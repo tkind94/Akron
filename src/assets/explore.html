@@ -1,0 +1,1454 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>akron explore</title>
+<style>
+:root {
+  color-scheme: dark light;
+  --bg: #0b0d10;
+  --panel: #10141a;
+  --line: #222831;
+  --ink: #c6cdd6;
+  --dim: #7d8794;
+  --accent: #6cb6ff;
+  --sel: #e8edf2;
+  --err: #d3766f;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f4f5f6;
+    --panel: #ffffff;
+    --line: #d7dce2;
+    --ink: #24292f;
+    --dim: #67717d;
+    --accent: #2670c2;
+    --sel: #1c2127;
+    --err: #a04b43;
+  }
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font: 12px/1.45 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  overflow: hidden;
+}
+
+/* ── top bar ── */
+#topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  white-space: nowrap;
+}
+/* breadcrumb: where am I / how do I get back (drill-down, TKI-54) */
+#crumbs { display: flex; align-items: center; gap: 4px; min-width: 0; }
+#crumbs .seg { cursor: pointer; color: var(--dim); }
+#crumbs .seg:hover { color: var(--accent); }
+#crumbs .seg.here { color: var(--ink); font-weight: 700; cursor: default; }
+#crumbs .sep { color: var(--dim); }
+#count { color: var(--dim); }
+#searchwrap { position: relative; flex: 1; max-width: 420px; }
+#search {
+  width: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 3px 7px;
+  font: inherit;
+  outline: none;
+}
+#search:focus { border-color: var(--accent); }
+#hitlist {
+  position: absolute;
+  top: calc(100% + 3px);
+  left: 0;
+  right: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  z-index: 10;
+  box-shadow: 0 6px 18px rgba(0,0,0,.35);
+}
+#hitlist div {
+  padding: 3px 8px;
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  overflow: hidden;
+}
+#hitlist div:hover { background: var(--bg); }
+#hitlist div.err { color: var(--err); cursor: default; }
+#hitlist div.err:hover { background: var(--panel); }
+#hitlist .rank { color: var(--dim); width: 2ch; text-align: right; }
+#hitlist .score { color: var(--accent); }
+#hitlist .loc { color: var(--dim); margin-left: auto; }
+#topbar label { color: var(--dim); display: flex; align-items: center; gap: 4px; }
+#topbar select {
+  background: var(--bg);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  font: inherit;
+  padding: 2px 3px;
+  max-width: 190px;
+}
+#topbar input[type=checkbox] { accent-color: var(--accent); }
+#views { display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+#views button {
+  background: var(--panel);
+  color: var(--dim);
+  border: none;
+  border-right: 1px solid var(--line);
+  font: inherit;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+#views button:last-child { border-right: none; }
+#views button.on { background: var(--bg); color: var(--ink); box-shadow: inset 0 -2px 0 var(--accent); }
+#views button:disabled { color: var(--line); cursor: default; }
+#axpick { display: inline-flex; gap: 10px; }
+#axpick[hidden] { display: none; }
+
+/* ── legend chips ── */
+#chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 7px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  cursor: pointer;
+  color: var(--dim);
+  user-select: none;
+}
+.chip .dot { width: 8px; height: 8px; border-radius: 50%; }
+.chip.on { border-color: var(--accent); color: var(--ink); }
+/* the branch chip: accent glyph instead of a dir color dot */
+.chip.branch .glyph { color: var(--accent); font-weight: 700; }
+
+/* ── main ── */
+main { display: grid; grid-template-columns: 1fr 340px; min-height: 0; }
+#stage { position: relative; min-width: 0; }
+#map { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+/* ── side panel ── */
+#panel {
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+  overflow-y: auto;
+  padding: 10px 12px;
+}
+#panel .empty { color: var(--dim); }
+#panel h2 { font-size: 13px; word-break: break-all; line-height: 1.3; }
+#panel h2 .ctx { color: var(--dim); font-weight: 400; }
+#panel .loc { color: var(--dim); }
+#panel .loc .pathseg { cursor: pointer; }
+#panel .loc .pathseg:hover { color: var(--accent); }
+#panel .meta { margin-top: 3px; }
+#panel .meta .k { color: var(--dim); }
+#panel section { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
+#panel h3 {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  margin-bottom: 3px;
+}
+#panel h3 .dim {
+  color: var(--dim);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+#panel ul { list-style: none; }
+#panel li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0 10px;
+  align-items: baseline;
+  padding: 2px 6px;
+  margin: 0 -6px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background-color .1s linear;
+}
+#panel li.cos-row { grid-template-columns: minmax(0, 1fr) auto 4ch; }
+#panel li.cos-row2 { grid-template-columns: minmax(0, 1fr) auto 4ch 4ch; }
+#panel li:hover { background: var(--bg); }
+#panel li .name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#panel li .name .ctx { color: var(--dim); font-weight: 400; }
+#panel li .loc { text-align: right; white-space: nowrap; }
+#panel li .cos {
+  color: var(--accent);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+#panel .none { color: var(--dim); }
+#panel .shared { color: var(--dim); word-break: break-all; margin-top: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}
+
+/* ── footer ── */
+footer {
+  padding: 3px 10px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+</style>
+</head>
+<body>
+<header id="topbar">
+  <span id="crumbs"></span>
+  <span id="count"></span>
+  <div id="searchwrap">
+    <input id="search" type="text" spellcheck="false" autocomplete="off"
+           placeholder="find — type a question, 3+ chars">
+    <div id="hitlist" hidden></div>
+  </div>
+  <nav id="views">
+    <button data-mode="map" class="on">map</button>
+    <button data-mode="anchor" disabled>anchor</button>
+    <button data-mode="time">time</button>
+    <button data-mode="axes">axes</button>
+  </nav>
+  <span id="axpick" hidden>
+    <label>x <select id="ax"></select></label>
+    <label>y <select id="ay"></select></label>
+  </span>
+  <label><input type="checkbox" id="tests"> tests</label>
+</header>
+<div id="chips"></div>
+<main>
+  <div id="stage"><canvas id="map"></canvas></div>
+  <aside id="panel"><div class="empty" id="card">no selection — click a symbol</div></aside>
+</main>
+<footer><span id="readout"></span></footer>
+<script>
+"use strict";
+const BOOT = __AKRON_BOOT__;
+
+/* ── palette: muted categorical, Okabe-Ito-leaning, legible on both themes ── */
+const PALETTE = ["#7fb3d9","#dba25e","#66b298","#c78bb1","#9d8fd6","#d3766f",
+                 "#b3ae6b","#6fc3c9","#9aa5b1","#bd8f62","#8fc07e","#c4a3e0"];
+
+const AXES = [
+  {id:"map_x", label:"map x"}, {id:"map_y", label:"map y"},
+  {id:"anchor_a", label:"structure sim → anchor (A)"},
+  {id:"anchor_b", label:"vocabulary sim → anchor (B)"},
+  {id:"age", label:"age (first seen)"},
+  {id:"recency", label:"recency (last touched)"},
+  {id:"file", label:"file order"},
+  {id:"pca0", label:"PCA-1"}, {id:"pca1", label:"PCA-2"},
+  {id:"pca2", label:"PCA-3"}, {id:"pca3", label:"PCA-4"},
+  {id:"pca4", label:"PCA-5"}, {id:"pca5", label:"PCA-6"},
+  {id:"pca6", label:"PCA-7"}, {id:"pca7", label:"PCA-8"},
+];
+const DEFAULT_HINT = "drag pan · wheel zoom · click select · dblclick drill in · esc drill up";
+
+let S = [];                 // /api/symbols
+let META = {pca_var: [], labels: {prod: [], full: []}}; // /api/meta
+let radii = [];             // px per symbol
+let dirColor = {};          // top-level dir -> color
+let showTests = BOOT.tests;
+let focusDirs = new Set();  // legend chips; empty = all
+let branchFocus = false;    // branch chip: ring branch-new, fade the rest
+let selected = -1;          // selected symbol id == the anchor
+let hovered = -1;
+let hits = [];              // /api/find results
+let hitSet = new Set();
+let anchor = {id:-1, a:null, b:null};
+let drill = null;           // /api/sublayout payload + set/slot indexes; null = whole repo
+let visited = new Set();    // ids selected this session (guidance: "next")
+let labelBoxes = [];        // dir labels placed this frame, for dblclick drill
+let mode = "map";           // map | anchor | time | axes
+let axisX = "map_x", axisY = "map_y";
+let px, py;                 // Float64Array world coords in [0,1]
+let vx, vy;                 // Float64Array raw axis values (NaN = absent)
+let ext = {x:[0,1], y:[0,1]};
+let parked = {x:0, y:0};    // visible symbols with no value on a date axis
+let view = {k:1, tx:0, ty:0};
+const PAD = 34;
+
+const $ = id => document.getElementById(id);
+const canvas = $("map"), ctx = canvas.getContext("2d");
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+/* ── axis values ── */
+function axisLabel(id) { return AXES.find(a => a.id === id).label; }
+function isAnchorAxis(id) { return id === "anchor_a" || id === "anchor_b"; }
+function isDateAxis(id) { return id === "age" || id === "recency"; }
+// Map coordinates for the current scope: the drill's re-laid-out plane when
+// drilled, the global plane otherwise. Two geometries either way: x/y lay
+// out product code only (tests smear the neighborhoods when they share the
+// plane); xt/yt include everything. NaN = not on this plane.
+function mapXY(s) {
+  if (drill) {
+    const k = drill.slot.get(s.id);
+    if (k === undefined) return [NaN, NaN];
+    return showTests
+      ? [drill.xt[k], drill.yt[k]]
+      : [drill.x[k] === null ? NaN : drill.x[k], drill.y[k] === null ? NaN : drill.y[k]];
+  }
+  return showTests ? [s.xt, s.yt] : [s.x === null ? NaN : s.x, s.y === null ? NaN : s.y];
+}
+function axisValue(id, s) {
+  if (id === "map_x") return mapXY(s)[0];
+  if (id === "map_y") return mapXY(s)[1];
+  if (id.startsWith("pca")) return s.pca[+id.slice(3)];
+  if (id === "anchor_a") return anchor.a ? anchor.a[s.id] : NaN;
+  if (id === "anchor_b") return anchor.b ? anchor.b[s.id] : NaN;
+  if (id === "age") return s.first_seen === null ? NaN : s.first_seen;
+  if (id === "recency") return s.last_touched === null ? NaN : s.last_touched;
+  return s.id; // file order: scan order (files walked, symbols in line order)
+}
+function fmtVal(id, v) {
+  if (!isFinite(v)) return "—";
+  if (isDateAxis(id)) return new Date(v * 1000).toISOString().slice(0, 10);
+  if (id === "file") return String(Math.round(v));
+  return v.toPrecision(3).replace(/\.?0+$/, "").replace(/\.$/, "");
+}
+
+function visible(s) {
+  return (showTests || !s.is_test) && (!drill || drill.set.has(s.id));
+}
+/* current color key: the drill re-derives keys (subdirs, or classes in a
+   file drill) so structure the global coloring flattened becomes visible */
+function dirOf(s) { return drill ? drill.dir[drill.slot.get(s.id)] : s.dir; }
+/* the selection's layout edges on the current scope's geometry */
+function neighborsOf(i) {
+  if (drill) {
+    const k = drill.slot.get(i);
+    if (k === undefined) return [];
+    return (showTests ? drill.nn[k] : drill.nnp[k]) || [];
+  }
+  return (showTests ? S[i].nn : S[i].nnp) || [];
+}
+
+/* ── layout: raw values → normalized [0,1] world coords ── */
+function layout() {
+  const n = S.length;
+  vx = new Float64Array(n); vy = new Float64Array(n);
+  px = new Float64Array(n); py = new Float64Array(n);
+  parked = {x:0, y:0};
+  for (let i = 0; i < n; i++) {
+    vx[i] = axisValue(axisX, S[i]);
+    vy[i] = axisValue(axisY, S[i]);
+  }
+  ext = {x: extentOf(vx, axisX, "x"), y: extentOf(vy, axisY, "y")};
+  for (let i = 0; i < n; i++) {
+    px[i] = norm(vx[i], ext.x);
+    py[i] = norm(vy[i], ext.y);
+  }
+}
+function extentOf(vals, axisId, which) {
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < vals.length; i++) {
+    if (!visible(S[i]) || !isFinite(vals[i])) {
+      if (visible(S[i]) && isDateAxis(axisId)) parked[which]++;
+      continue;
+    }
+    if (vals[i] < lo) lo = vals[i];
+    if (vals[i] > hi) hi = vals[i];
+  }
+  if (lo > hi) return [NaN, NaN]; // nothing has a value (e.g. anchor unset)
+  return [lo, hi];
+}
+function norm(v, e) {
+  if (!isFinite(v)) return isFinite(e[0]) ? 0 : 0.5; // absent: park at min edge
+  if (e[1] === e[0]) return 0.5;
+  return (v - e[0]) / (e[1] - e[0]);
+}
+
+/* ── view transform ── */
+function baseXY(i) {
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  return [PAD + px[i] * (W - 2 * PAD), H - PAD - py[i] * (H - 2 * PAD)];
+}
+function screenXY(i) {
+  const [bx, by] = baseXY(i);
+  return [bx * view.k + view.tx, by * view.k + view.ty];
+}
+function fitView() { view = {k: 1, tx: 0, ty: 0}; }
+function centerOn(id) {
+  const [bx, by] = baseXY(id);
+  view.tx = canvas.clientWidth / 2 - bx * view.k;
+  view.ty = canvas.clientHeight / 2 - by * view.k;
+  scheduleDraw();
+}
+
+/* ── drawing ── */
+let raf = 0;
+function scheduleDraw() {
+  if (!raf) raf = requestAnimationFrame(() => { raf = 0; draw(); });
+}
+function draw() {
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  const dimInk = cssVar("--dim"), selInk = cssVar("--sel"), accent = cssVar("--accent");
+  const focus = focusDirs.size > 0;
+
+  // time view: date gridlines under the points
+  if (mode === "time" && isFinite(ext.x[0]) && ext.x[1] > ext.x[0]) {
+    ctx.strokeStyle = cssVar("--line");
+    ctx.fillStyle = dimInk;
+    ctx.font = "10px ui-monospace, Menlo, monospace";
+    ctx.lineWidth = 1;
+    for (const tick of timeTicks(ext.x[0], ext.x[1])) {
+      const bx = PAD + norm(tick.t, ext.x) * (W - 2 * PAD);
+      const sx = bx * view.k + view.tx;
+      if (sx < 0 || sx > W) continue;
+      ctx.beginPath();
+      ctx.moveTo(sx, 24);
+      ctx.lineTo(sx, H - 40);
+      ctx.stroke();
+      ctx.fillText(tick.label, sx + 3, H - 28);
+    }
+  }
+
+  // map mode: island labels + the selection's layout edges, under the points
+  if (mode === "map") {
+    drawDirLabels(W, H, dimInk);
+    if (hovered >= 0 && hovered !== selected && visible(S[hovered])) drawEdges(hovered, 0.25, accent);
+    if (selected >= 0 && visible(S[selected])) drawEdges(selected, 0.6, accent);
+  }
+
+  for (let i = 0; i < S.length; i++) {
+    const s = S[i];
+    if (!visible(s)) continue;
+    const [x, y] = screenXY(i);
+    const r = radii[i];
+    if (x < -r || y < -r || x > W + r || y > H + r) continue;
+    const faded = focus && !focusDirs.has(dirOf(s));
+    let alpha = faded ? 0.12 : (s.is_test ? 0.55 : 0.85);
+    if (branchFocus && !s.branch_new) alpha = Math.min(alpha, 0.35);
+    ctx.globalAlpha = alpha;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, 6.2832);
+    if (s.is_test) {
+      ctx.strokeStyle = dirColor[dirOf(s)];
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = dirColor[dirOf(s)];
+      ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  // branch focus: DOUBLE accent ring on every branch-new point, in every
+  // view — a search hit wears a single ring, so the two sets stay
+  // distinguishable when both are active.
+  if (branchFocus) {
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 1.5;
+    for (let i = 0; i < S.length; i++) {
+      if (!S[i].branch_new || !visible(S[i])) continue;
+      const [x, y] = screenXY(i);
+      const r = radii[i] + 2.5;
+      if (x < -r - 3 || y < -r - 3 || x > W + r + 3 || y > H + r + 3) continue;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, 6.2832);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(x, y, r + 3, 0, 6.2832);
+      ctx.stroke();
+    }
+  }
+
+  // search hits: accent ring
+  for (const h of hits) {
+    if (!visible(S[h.id])) continue;
+    const [x, y] = screenXY(h.id);
+    ctx.beginPath();
+    ctx.arc(x, y, radii[h.id] + 2.5, 0, 6.2832);
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+  // hover ring
+  if (hovered >= 0 && visible(S[hovered])) {
+    const [x, y] = screenXY(hovered);
+    ctx.beginPath();
+    ctx.arc(x, y, radii[hovered] + 3, 0, 6.2832);
+    ctx.strokeStyle = dimInk;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+  // selection ring (the anchor)
+  if (selected >= 0 && visible(S[selected])) {
+    const [x, y] = screenXY(selected);
+    ctx.beginPath();
+    ctx.arc(x, y, radii[selected] + 4, 0, 6.2832);
+    ctx.strokeStyle = selInk;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  // captions: per view, real numbers only
+  ctx.fillStyle = dimInk;
+  ctx.font = "11px ui-monospace, Menlo, monospace";
+  if (mode === "map") {
+    let cap = `map · ${BOOT.k}-nearest-neighbor layout · cosine over embeddings`;
+    if (drill) cap += ` · drill: ${drill.path} · ${drill.ids.length} of ${BOOT.count} symbols`;
+    if (selected >= 0 && visible(S[selected])) cap += " · edges: selection's layout neighbors";
+    ctx.fillText(cap, PAD, H - 10);
+  } else if (mode === "anchor") {
+    const a = selected >= 0 ? S[selected].qname : "anchor";
+    ctx.fillText(`x · structure sim → ${a} (A) · ${fmtVal(axisX, ext.x[0])} … ${fmtVal(axisX, ext.x[1])}`, PAD, H - 10);
+    ctx.fillText(`y · vocabulary sim → ${a} (B) · ${fmtVal(axisY, ext.y[0])} … ${fmtVal(axisY, ext.y[1])}`, PAD, 16);
+  } else if (mode === "time") {
+    ctx.fillText(`x · last touched · ${fmtVal(axisX, ext.x[0])} … ${fmtVal(axisX, ext.x[1])}`, PAD, H - 10);
+    ctx.fillText("y · map y", PAD, 16);
+  } else {
+    ctx.fillText(`x · ${axisLabel(axisX)} · ${fmtVal(axisX, ext.x[0])} … ${fmtVal(axisX, ext.x[1])}`, PAD, H - 10);
+    ctx.fillText(`y · ${axisLabel(axisY)} · ${fmtVal(axisY, ext.y[0])} … ${fmtVal(axisY, ext.y[1])}`, PAD, 16);
+  }
+}
+
+// The selection's layout edges — the mutual-kNN springs that put it where
+// it is. Geometry-matched: the drill's own adjacency when drilled; nnp on
+// the product-only plane, nn with tests on.
+function drawEdges(i, alpha, ink) {
+  const ids = neighborsOf(i);
+  if (!ids.length) return;
+  const [x0, y0] = screenXY(i);
+  ctx.beginPath();
+  for (const j of ids) {
+    if (!visible(S[j])) continue;
+    const [x1, y1] = screenXY(j);
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x1, y1);
+  }
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+// Directory labels at island centroids (server-gated: only dirs whose
+// points cohere — see /api/meta). Placement never covers a point's
+// hit-target: try the centroid, then just below the island's core radius
+// (L.r, the gating median), then just above; a label with no clear spot —
+// or one colliding with an already-placed label (count-desc order, big
+// islands win) — is skipped this frame. Hidden past the zoom range where
+// centroid labels stop meaning anything.
+function drawDirLabels(W, H, ink) {
+  labelBoxes = [];
+  if (view.k < 0.4 || view.k > 6) return;
+  const src = drill ? drill.labels : META.labels;
+  const labs = showTests ? src.full : src.prod;
+  if (!labs.length) return;
+  ctx.font = "10px ui-monospace, Menlo, monospace";
+  ctx.textAlign = "center";
+  ctx.fillStyle = ink;
+  const focus = focusDirs.size > 0;
+  const placed = [];
+  const clearOfPoints = box => {
+    for (let i = 0; i < S.length; i++) {
+      if (!visible(S[i])) continue;
+      const [x, y] = screenXY(i);
+      const t = radii[i] + 3; // the click hit-target
+      if (x + t > box.x0 && x - t < box.x1 && y + t > box.y0 && y - t < box.y1) return false;
+    }
+    return true;
+  };
+  for (const L of labs) {
+    const bx = PAD + L.x * (W - 2 * PAD), by = H - PAD - L.y * (H - 2 * PAD);
+    const sx = bx * view.k + view.tx, sy = by * view.k + view.ty;
+    if (sx < -80 || sx > W + 80 || sy < -20 || sy > H + 20) continue;
+    const rs = L.r * (W - 2 * PAD) * view.k; // island core radius, on screen
+    const w = ctx.measureText(L.dir).width;
+    let box = null;
+    for (const cy of [sy, sy + rs + 14, sy - rs - 8]) {
+      const b = {x0: sx - w / 2 - 4, x1: sx + w / 2 + 4, y0: cy - 12, y1: cy + 4};
+      if (clearOfPoints(b) &&
+          !placed.some(o => o.x0 < b.x1 && b.x0 < o.x1 && o.y0 < b.y1 && b.y0 < o.y1)) {
+        box = b;
+        break;
+      }
+    }
+    if (!box) continue;
+    placed.push(box);
+    labelBoxes.push({...box, path: drillTarget(L.dir)});
+    ctx.globalAlpha = focus && !focusDirs.has(L.dir) ? 0.12 : 0.75;
+    ctx.fillText(L.dir, sx, box.y1 - 4);
+  }
+  ctx.globalAlpha = 1;
+  ctx.textAlign = "start";
+}
+
+// month/year tick marks for the time view's date axis
+function timeTicks(lo, hi) {
+  const out = [];
+  const spanDays = (hi - lo) / 86400;
+  const stepMonths = spanDays > 1100 ? 12 : spanDays > 400 ? 3 : 1;
+  const d0 = new Date(lo * 1000);
+  let y = d0.getUTCFullYear(), m = d0.getUTCMonth() + 1;
+  for (let i = 0; i < 400; i++) {
+    if (m > 11) { m -= 12; y += 1; }
+    const t = Date.UTC(y, m, 1) / 1000;
+    if (t > hi) break;
+    if (m % stepMonths === 0) {
+      out.push({t, label: stepMonths === 12 || m === 0
+        ? String(y) : `${y}-${String(m + 1).padStart(2, "0")}`});
+    }
+    m += 1;
+  }
+  return out;
+}
+
+/* ── views ── */
+async function applyMode(m) {
+  mode = m;
+  if (m === "map") { axisX = "map_x"; axisY = "map_y"; }
+  else if (m === "anchor") { axisX = "anchor_a"; axisY = "anchor_b"; }
+  else if (m === "time") { axisX = "recency"; axisY = "map_y"; }
+  else { axisX = $("ax").value; axisY = $("ay").value; }
+  $("axpick").hidden = m !== "axes";
+  document.querySelectorAll("#views button").forEach(b =>
+    b.classList.toggle("on", b.dataset.mode === m));
+  if ((isAnchorAxis(axisX) || isAnchorAxis(axisY)) && selected >= 0) {
+    await loadAnchor(selected);
+  }
+  layout();
+  fitView();
+  footer();
+  scheduleDraw();
+}
+function syncViews() {
+  const anchorBtn = document.querySelector('#views button[data-mode="anchor"]');
+  anchorBtn.disabled = selected < 0;
+  anchorBtn.title = selected < 0 ? "click a symbol to set the anchor" : "";
+  const timeBtn = document.querySelector('#views button[data-mode="time"]');
+  const dated = S.some(s => s.last_touched !== null);
+  timeBtn.disabled = !dated;
+  timeBtn.title = dated ? "" : "no git history at this root";
+}
+
+/* ── drill-down (TKI-54): descend into a dir or file, climb back out ── */
+// The absolute path a color key drills to, or null when it isn't a path
+// (class keys in a file drill, `.` = the scope's own root files).
+function drillTarget(key) {
+  if (key === "." || (drill && drill.kind === "file")) return null;
+  return drill ? `${drill.path}/${key}` : key;
+}
+let drillSeq = 0;
+// Enter the scope at `path` ("" = whole repo). The server re-runs the
+// layout pipeline on the subset (deterministic — seeded from the global
+// coordinates); the page swaps scope: chips, labels, breadcrumb, planes.
+async function drillTo(path) {
+  const seq = ++drillSeq;
+  if (!path) {
+    drill = null;
+  } else {
+    let j;
+    try {
+      const r = await fetch(`/api/sublayout?path=${encodeURIComponent(path)}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      j = await r.json();
+    } catch (e) {
+      $("readout").textContent =
+        `drill failed — ${e instanceof TypeError ? "server unreachable" : e.message}`;
+      return;
+    }
+    if (seq !== drillSeq) return; // a newer drill is in flight
+    j.set = new Set(j.ids);
+    j.slot = new Map(j.ids.map((g, k) => [g, k]));
+    drill = j;
+  }
+  focusDirs.clear();
+  buildChips();
+  breadcrumb();
+  if (selected >= 0 && drill && !drill.set.has(selected)) {
+    // the selection fell out of scope: clear it, and anchor axes with it
+    selected = -1;
+    anchor = {id: -1, a: null, b: null};
+    syncViews();
+    if (mode === "anchor") { await applyMode("map"); }
+  }
+  if (selected < 0) renderGuide();
+  layout();
+  fitView();
+  footer();
+  scheduleDraw();
+}
+function drillUp() {
+  if (!drill) return;
+  const segs = drill.path.split("/");
+  segs.pop();
+  drillTo(segs.join("/"));
+}
+// where am I / how do I get back: repo › dir › … › file, every ancestor
+// clickable, the current scope bold
+function breadcrumb() {
+  const el = $("crumbs");
+  el.textContent = "";
+  const segs = drill ? drill.path.split("/") : [];
+  const add = (label, path, here) => {
+    const s = document.createElement("span");
+    s.className = "seg" + (here ? " here" : "");
+    s.textContent = label;
+    s.title = here ? "" : (path === "" ? "whole repo" : path);
+    if (!here) s.addEventListener("click", () => drillTo(path));
+    el.appendChild(s);
+  };
+  add(BOOT.repo, "", segs.length === 0);
+  segs.forEach((seg, i) => {
+    const sep = document.createElement("span");
+    sep.className = "sep";
+    sep.textContent = "›";
+    el.appendChild(sep);
+    add(seg, segs.slice(0, i + 1).join("/"), i === segs.length - 1);
+  });
+  $("count").textContent = `${drill ? drill.ids.length : BOOT.count} symbols`;
+}
+
+/* ── footer readout ── */
+function footer() {
+  const el = $("readout");
+  if (hovered >= 0) {
+    const s = S[hovered];
+    const parts = [s.qname, `${s.file}:${s.line}`];
+    if (mode === "anchor") {
+      parts.push(`structure ${fmtVal(axisX, vx[hovered])}`,
+                 `vocabulary ${fmtVal(axisY, vy[hovered])}`);
+    } else if (mode === "time") {
+      parts.push(`last touched ${fmtVal(axisX, vx[hovered])}`);
+    } else if (mode === "axes") {
+      parts.push(`${axisLabel(axisX)} ${fmtVal(axisX, vx[hovered])}`,
+                 `${axisLabel(axisY)} ${fmtVal(axisY, vy[hovered])}`);
+    }
+    if (s.branch_new) parts.push("branch-new");
+    el.textContent = parts.join(" · ");
+    return;
+  }
+  if ((isAnchorAxis(axisX) || isAnchorAxis(axisY)) && selected < 0) {
+    el.textContent = "click a symbol to set the anchor";
+    return;
+  }
+  const notes = [];
+  if ((isAnchorAxis(axisX) || isAnchorAxis(axisY)) && selected >= 0) {
+    notes.push(`anchor: ${S[selected].qname}`);
+  }
+  const dateNote = (axis, which, count) => {
+    if (!isDateAxis(axis) || count === 0) return;
+    notes.push(isFinite(ext[which][0])
+      ? `${count} symbols without git dates sit at ${which}=min`
+      : `no git dates at this root — ${which} flat`);
+  };
+  dateNote(axisX, "x", parked.x);
+  dateNote(axisY, "y", parked.y);
+  if (mode === "axes") {
+    notes.push("PCA components are directions of greatest variance, ranked");
+  }
+  el.textContent = notes.length ? notes.join(" · ") : DEFAULT_HINT;
+}
+
+/* ── hit test ── */
+function nearest(mx, my) {
+  let best = -1, bestD = Infinity;
+  for (let i = 0; i < S.length; i++) {
+    if (!visible(S[i])) continue;
+    const [x, y] = screenXY(i);
+    const d = Math.hypot(x - mx, y - my);
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return best >= 0 && bestD <= Math.max(9, radii[best] + 3) ? best : -1;
+}
+
+/* ── selection: the anchor ── */
+async function select(id, center) {
+  // selecting outside the drill (search hit, card reference) exits to the
+  // whole-repo map — the breadcrumb resets, so "where am I" stays obvious
+  if (drill && !drill.set.has(id)) await drillTo("");
+  selected = id;
+  visited.add(id);
+  loadCard(id);
+  syncViews();
+  if (isAnchorAxis(axisX) || isAnchorAxis(axisY)) {
+    await loadAnchor(id);
+    layout();
+    // Re-anchoring re-projects every point and the anchor itself is the
+    // (1,1) corner by construction — centering the old viewport on it
+    // shoves the whole distribution off-screen. Refit instead.
+    if (center) fitView();
+  } else if (center) {
+    centerOn(id);
+  }
+  footer();
+  scheduleDraw();
+}
+async function loadAnchor(id) {
+  if (anchor.id === id) return;
+  const r = await fetch(`/api/anchor?id=${id}`);
+  const j = await r.json();
+  // stale-response guard (same as loadCard): if the selection moved while
+  // this fetch was in flight, a later loadAnchor owns the state.
+  if (id !== selected) return;
+  anchor = {id, a: j.a_cos, b: j.b_cos};
+}
+
+/* ── the card ── */
+// middle-ellipsis: keeps the path's head (the dir that places it) and tail
+// (the file that names it); the full path rides in the title attr
+function midPath(p, budget) {
+  if (p.length <= budget) return p;
+  const head = Math.ceil((budget - 1) / 2), tail = budget - 1 - head;
+  return p.slice(0, head) + "…" + p.slice(-tail);
+}
+// "Class.method" → dimmed "Class." context + emphasized "method"
+function qnameSpan(qname) {
+  const span = document.createElement("span");
+  span.className = "name";
+  const parts = qname.split(".");
+  const base = parts.pop();
+  if (parts.length) {
+    const ctx = document.createElement("span");
+    ctx.className = "ctx";
+    ctx.textContent = parts.join(".") + ".";
+    span.appendChild(ctx);
+  }
+  span.appendChild(document.createTextNode(base));
+  return span;
+}
+function refLine(ref, extra) {
+  const li = document.createElement("li");
+  li.dataset.id = ref.id;
+  li.title = `${ref.qname} — ${ref.file}:${ref.line}`;
+  li.appendChild(qnameSpan(ref.qname));
+  const loc = document.createElement("span");
+  loc.className = "loc";
+  loc.textContent = `${midPath(ref.file, 16)}:${ref.line}`;
+  li.appendChild(loc);
+  if (Array.isArray(extra)) {
+    // two-cosine rows (nearest existing: A structure, B vocabulary)
+    li.className = "cos-row2";
+    for (const v of extra) {
+      const c = document.createElement("span");
+      c.className = "cos";
+      c.textContent = v.toFixed(2);
+      li.appendChild(c);
+    }
+  } else if (extra !== undefined) {
+    li.className = "cos-row";
+    const c = document.createElement("span");
+    c.className = "cos";
+    c.textContent = extra.toFixed(2);
+    li.appendChild(c);
+  }
+  li.addEventListener("click", () => select(ref.id, true));
+  return li;
+}
+function listSection(title, titleDim, build) {
+  const sec = document.createElement("section");
+  const h = document.createElement("h3");
+  h.textContent = title + " ";
+  if (titleDim) {
+    const d = document.createElement("span");
+    d.className = "dim";
+    d.textContent = titleDim;
+    h.appendChild(d);
+  }
+  sec.appendChild(h);
+  build(sec);
+  return sec;
+}
+async function loadCard(id) {
+  const r = await fetch(`/api/explain?id=${id}`);
+  const c = await r.json();
+  if (c.id !== selected) return; // stale response
+  const card = $("card");
+  card.className = "";
+  card.textContent = "";
+
+  const h2 = document.createElement("h2");
+  h2.appendChild(qnameSpan(c.qname));
+  card.appendChild(h2);
+  // the path doubles as the drill ladder: every segment descends to it
+  const loc = document.createElement("div");
+  loc.className = "loc";
+  const segs = c.file.split("/");
+  segs.forEach((seg, i) => {
+    if (i) loc.appendChild(document.createTextNode("/"));
+    const sp = document.createElement("span");
+    sp.className = "pathseg";
+    sp.textContent = seg;
+    const target = segs.slice(0, i + 1).join("/");
+    sp.title = `drill: ${target}`;
+    sp.addEventListener("click", () => drillTo(target));
+    loc.appendChild(sp);
+  });
+  loc.appendChild(document.createTextNode(`:${c.line}`));
+  card.appendChild(loc);
+
+  // meta line: dim labels, ink values
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  const pair = (label, value) => {
+    const s = document.createElement("span");
+    const k = document.createElement("span");
+    k.className = "k";
+    k.textContent = label + " ";
+    s.append(k, value);
+    return s;
+  };
+  const items = [pair("nodes", String(c.nodes))];
+  if (c.is_test) items.push(document.createTextNode("test"));
+  if (c.entry !== null) items.push(pair("entry", `${c.entry}×`));
+  if (c.dating) {
+    items.push(pair("first", c.dating.first));
+    items.push(pair("last", c.dating.last));
+    items.push(document.createTextNode(c.dating.activity));
+  }
+  items.forEach((el, i) => {
+    if (i) {
+      const sep = document.createElement("span");
+      sep.className = "k";
+      sep.textContent = " · ";
+      meta.appendChild(sep);
+    }
+    meta.appendChild(el);
+  });
+  card.appendChild(meta);
+
+  // branch-new symbols: the closest already-existing code (the model ranks;
+  // the numbers are Channel A/B's)
+  if (c.nearest_existing) {
+    card.appendChild(listSection("nearest existing",
+        "ranked by embedding · A structure · B vocabulary", sec => {
+      if (!c.nearest_existing.length) {
+        const none = document.createElement("div");
+        none.className = "none";
+        none.textContent = "none";
+        sec.appendChild(none);
+        return;
+      }
+      const ul = document.createElement("ul");
+      c.nearest_existing.forEach(x => ul.appendChild(refLine(x, [x.a_cos, x.b_cos])));
+      sec.appendChild(ul);
+    }));
+  }
+
+  if (c.clones.exact.length || c.clones.near.length) {
+    card.appendChild(listSection("clones", "same tight shape cluster", sec => {
+      if (c.clones.exact.length) {
+        const sub = document.createElement("div");
+        sub.className = "shared";
+        sub.textContent = "exact (identical structure)";
+        sec.appendChild(sub);
+        const ul = document.createElement("ul");
+        c.clones.exact.forEach(x => ul.appendChild(refLine(x)));
+        sec.appendChild(ul);
+      }
+      if (c.clones.near.length) {
+        const sub = document.createElement("div");
+        sub.className = "shared";
+        sub.textContent = "near (cos A)";
+        sec.appendChild(sub);
+        const ul = document.createElement("ul");
+        c.clones.near.forEach(x => ul.appendChild(refLine(x, x.cos)));
+        sec.appendChild(ul);
+      }
+    }));
+  }
+
+  card.appendChild(listSection("role twins", c.twins
+      ? `vocab ≥${c.twins.theta_b.toFixed(2)}, different shape · B=${c.twins.b_max.toFixed(2)}`
+      : "vocab ≥0.55, different shape", sec => {
+    if (!c.twins) {
+      const none = document.createElement("div");
+      none.className = "none";
+      none.textContent = "none";
+      sec.appendChild(none);
+      return;
+    }
+    const ul = document.createElement("ul");
+    c.twins.members.forEach(x => ul.appendChild(refLine(x)));
+    sec.appendChild(ul);
+    const sh = document.createElement("div");
+    sh.className = "shared";
+    sh.textContent = "shared: " + c.twins.shared_terms.join(", ");
+    sec.appendChild(sh);
+  }));
+
+  card.appendChild(listSection(`callers ${c.callers.length} · callees ${c.callees.length}`,
+      "import-aware", sec => {
+    if (!c.callers.length && !c.callees.length) return;
+    if (c.callers.length) {
+      const sub = document.createElement("div");
+      sub.className = "shared";
+      sub.textContent = "callers";
+      sec.appendChild(sub);
+      const ul = document.createElement("ul");
+      c.callers.forEach(x => ul.appendChild(refLine(x)));
+      sec.appendChild(ul);
+    }
+    if (c.callees.length) {
+      const sub = document.createElement("div");
+      sub.className = "shared";
+      sub.textContent = "callees";
+      sec.appendChild(sub);
+      const ul = document.createElement("ul");
+      c.callees.forEach(x => ul.appendChild(refLine(x)));
+      sec.appendChild(ul);
+    }
+  }));
+
+  if (c.family) {
+    card.appendChild(listSection("family", "experimental", sec => {
+      const d = document.createElement("div");
+      d.textContent = `F${c.family.index} member (${c.family.role}, cos ${c.family.cos.toFixed(2)})`;
+      sec.appendChild(d);
+    }));
+  }
+
+  // guidance: the nearest layout neighbor not yet visited this session —
+  // answers "what related code haven't I read?". Ranked by map-plane
+  // distance (a fact of what is drawn); no model numbers shown.
+  const [sx, sy] = mapXY(S[id]);
+  const next = neighborsOf(id)
+    .filter(j => visible(S[j]) && !visited.has(j))
+    .map(j => { const [x, y] = mapXY(S[j]); return [Math.hypot(x - sx, y - sy), j]; })
+    .filter(d => isFinite(d[0]))
+    .sort((a, b) => a[0] - b[0])[0];
+  if (next) {
+    card.appendChild(listSection("next", "nearest unvisited layout neighbor", sec => {
+      const ul = document.createElement("ul");
+      const s = S[next[1]];
+      ul.appendChild(refLine({id: s.id, qname: s.qname, file: s.file, line: s.line}));
+      sec.appendChild(ul);
+    }));
+  }
+}
+
+/* ── search ── */
+let searchTimer = 0, searchSeq = 0;
+function clearHits() {
+  hits = [];
+  hitSet.clear();
+  $("hitlist").hidden = true;
+  scheduleDraw();
+}
+// A failed find must LOOK failed — a dead server rendered as "no results"
+// sends the reader hunting for a query that can't work.
+function searchError(msg) {
+  hits = [];
+  hitSet.clear();
+  const list = $("hitlist");
+  list.textContent = "";
+  const row = document.createElement("div");
+  row.className = "err";
+  row.textContent = msg;
+  list.appendChild(row);
+  list.hidden = false;
+  scheduleDraw();
+}
+function runSearch(q) {
+  const seq = ++searchSeq;
+  fetch(`/api/find?q=${encodeURIComponent(q)}&tests=${showTests ? 1 : 0}&top=20`)
+    .then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    })
+    .then(j => {
+      if (seq !== searchSeq) return; // a newer query is in flight
+      hits = j.hits || [];
+      hitSet = new Set(hits.map(h => h.id));
+      const list = $("hitlist");
+      list.textContent = "";
+      for (const h of hits) {
+        const row = document.createElement("div");
+        const rank = document.createElement("span");
+        rank.className = "rank";
+        rank.textContent = h.rank;
+        const score = document.createElement("span");
+        score.className = "score";
+        score.textContent = h.score.toFixed(2);
+        const name = document.createElement("span");
+        name.textContent = h.qname;
+        const loc = document.createElement("span");
+        loc.className = "loc";
+        loc.textContent = `${h.file}:${h.line}`;
+        row.append(rank, score, name, loc);
+        row.addEventListener("mousedown", e => {
+          e.preventDefault();
+          select(h.id, true);
+          $("hitlist").hidden = true;
+        });
+        list.appendChild(row);
+      }
+      list.hidden = hits.length === 0;
+      scheduleDraw();
+    })
+    .catch(e => {
+      if (seq !== searchSeq) return;
+      searchError(`find failed — ${e instanceof TypeError ? "server unreachable" : e.message}`);
+    });
+}
+
+/* ── boot ── */
+// Legend chips for the current scope: the drill re-keys colors, so chips
+// rebuild on every drill change. Click = focus fade; dblclick = drill in
+// (when the key is a path).
+function buildChips() {
+  const counts = new Map();
+  for (const s of S) {
+    if (drill && !drill.set.has(s.id)) continue;
+    const d = dirOf(s);
+    counts.set(d, (counts.get(d) || 0) + 1);
+  }
+  const dirs = [...counts.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+  dirColor = {};
+  const chips = $("chips");
+  chips.textContent = "";
+  dirs.forEach(([dir, cnt], i) => {
+    dirColor[dir] = PALETTE[i % PALETTE.length];
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    dot.style.background = dirColor[dir];
+    chip.appendChild(dot);
+    chip.appendChild(document.createTextNode(`${dir} ${cnt}`));
+    chip.addEventListener("click", () => {
+      if (focusDirs.has(dir)) focusDirs.delete(dir); else focusDirs.add(dir);
+      chip.classList.toggle("on");
+      scheduleDraw();
+    });
+    const target = drillTarget(dir);
+    if (target) {
+      chip.title = `dblclick: drill into ${target}`;
+      chip.addEventListener("dblclick", () => drillTo(target));
+    }
+    chips.appendChild(chip);
+  });
+
+  // branch chip (first in the row, distinct from the dir chips): click
+  // toggles branch focus — branch-new points ring, everything else fades
+  if (META.branch) {
+    const chip = document.createElement("span");
+    chip.className = "chip branch" + (branchFocus ? " on" : "");
+    const glyph = document.createElement("span");
+    glyph.className = "glyph";
+    glyph.textContent = "⎇";
+    chip.appendChild(glyph);
+    chip.appendChild(document.createTextNode(
+      `${META.branch.name} · ${META.branch.changed} changed vs ${META.branch.base}`));
+    chip.addEventListener("click", () => {
+      branchFocus = !branchFocus;
+      chip.classList.toggle("on", branchFocus);
+      scheduleDraw();
+    });
+    chips.prepend(chip);
+  }
+}
+
+function prep() {
+  buildChips();
+
+  // radius ∝ sqrt(nodes), mapped into [2, 7] px
+  let lo = Infinity, hi = -Infinity;
+  for (const s of S) {
+    const r = Math.sqrt(s.nodes);
+    if (r < lo) lo = r;
+    if (r > hi) hi = r;
+  }
+  radii = S.map(s => hi === lo ? 3.5 : 2 + 5 * (Math.sqrt(s.nodes) - lo) / (hi - lo));
+}
+
+/* ── guidance (TKI-54): factual starting points for the current scope ──
+   Counts and dates only — akron shows structure, it never judges it.
+   Scope-aware: inside a drill every section re-derives over the members. */
+function renderGuide() {
+  const card = $("card");
+  card.className = "";
+  card.textContent = "";
+  const scope = S.filter(s => visible(s));
+  const h2 = document.createElement("h2");
+  h2.textContent = "start";
+  card.appendChild(h2);
+  const loc = document.createElement("div");
+  loc.className = "loc";
+  loc.textContent = `${drill ? drill.path : BOOT.repo} · ${scope.length} symbols shown`;
+  card.appendChild(loc);
+
+  const section = (title, dim, rows) => {
+    if (!rows.length) return; // no fact, no section
+    card.appendChild(listSection(title, dim, sec => {
+      const ul = document.createElement("ul");
+      rows.forEach(r => ul.appendChild(r));
+      sec.appendChild(ul);
+    }));
+  };
+  const row = (nameEl, value, title, onClick) => {
+    const li = document.createElement("li");
+    li.appendChild(nameEl);
+    const v = document.createElement("span");
+    v.className = "loc";
+    v.textContent = value;
+    li.appendChild(v);
+    li.title = title;
+    li.addEventListener("click", onClick);
+    return li;
+  };
+  const nameEl = text => {
+    const n = document.createElement("span");
+    n.className = "name";
+    n.textContent = text;
+    return n;
+  };
+  const symRow = (s, value) =>
+    row(qnameSpan(s.qname), value, `${s.qname} — ${s.file}:${s.line}`, () => select(s.id, true));
+
+  if (!drill || drill.kind !== "file") {
+    const counts = new Map();
+    for (const s of scope) {
+      const d = dirOf(s);
+      // "." = this scope's root files; ".py" keys are files (flat-drill
+      // coloring) — the files section below already carries those
+      if (d !== "." && !d.endsWith(".py")) counts.set(d, (counts.get(d) || 0) + 1);
+    }
+    const dirs = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+      .slice(0, 5)
+      .map(([dir, cnt]) => row(nameEl(dir), String(cnt),
+        `drill: ${drillTarget(dir)}`, () => drillTo(drillTarget(dir))));
+    section("largest dirs", "symbols · click to drill", dirs);
+
+    const fcounts = new Map();
+    for (const s of scope) fcounts.set(s.file, (fcounts.get(s.file) || 0) + 1);
+    if (fcounts.size > 1) {
+      const files = [...fcounts.entries()]
+        .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+        .slice(0, 3)
+        .map(([file, cnt]) => row(nameEl(midPath(file, 30)), String(cnt),
+          `drill: ${file}`, () => drillTo(file)));
+      section("largest files", "symbols · click to drill", files);
+    }
+  }
+
+  const called = scope.filter(s => s.indeg > 0)
+    .sort((a, b) => b.indeg - a.indeg || a.id - b.id)
+    .slice(0, 5)
+    .map(s => symRow(s, `${s.indeg}×`));
+  section("most callers", "import-aware in-degree", called);
+
+  const dated = scope.filter(s => s.last_touched !== null)
+    .sort((a, b) => b.last_touched - a.last_touched || a.id - b.id)
+    .slice(0, 3)
+    .map(s => symRow(s, new Date(s.last_touched * 1000).toISOString().slice(0, 10)));
+  section("last touched", "newest first", dated);
+}
+
+function initControls() {
+  document.title = `akron explore — ${BOOT.repo}`;
+  breadcrumb();
+  for (const selId of ["ax", "ay"]) {
+    const sel = $(selId);
+    for (const a of AXES) {
+      const o = document.createElement("option");
+      o.value = a.id;
+      o.textContent = a.label;
+      sel.appendChild(o);
+    }
+  }
+  $("ax").value = "pca0";
+  $("ay").value = "pca1";
+  $("tests").checked = showTests;
+
+  document.querySelectorAll("#views button").forEach(b => {
+    b.addEventListener("click", () => { if (!b.disabled) applyMode(b.dataset.mode); });
+  });
+  const onAxis = async () => {
+    axisX = $("ax").value;
+    axisY = $("ay").value;
+    if ((isAnchorAxis(axisX) || isAnchorAxis(axisY)) && selected >= 0) {
+      await loadAnchor(selected);
+    }
+    layout();
+    fitView();
+    footer();
+    scheduleDraw();
+  };
+  $("ax").addEventListener("change", onAxis);
+  $("ay").addEventListener("change", onAxis);
+
+  $("tests").addEventListener("change", () => {
+    showTests = $("tests").checked;
+    layout(); // extents are over visible symbols
+    if (selected < 0) renderGuide(); // guide facts are scope-wide
+    footer();
+    scheduleDraw();
+  });
+
+  const search = $("search");
+  search.addEventListener("input", () => {
+    const q = search.value.trim();
+    clearTimeout(searchTimer);
+    if (q.length < 3) { clearHits(); return; }
+    searchTimer = setTimeout(() => runSearch(q), 250);
+  });
+  search.addEventListener("keydown", e => {
+    if (e.key === "Enter" && hits.length) {
+      select(hits[0].id, true);
+      $("hitlist").hidden = true;
+    } else if (e.key === "Escape") {
+      $("hitlist").hidden = true;
+      search.blur();
+    }
+  });
+  search.addEventListener("focus", () => {
+    if (hits.length) $("hitlist").hidden = false;
+  });
+  document.addEventListener("mousedown", e => {
+    if (!$("searchwrap").contains(e.target)) $("hitlist").hidden = true;
+  });
+
+  // pan / zoom / hover / click
+  let dragging = false, moved = 0, lastX = 0, lastY = 0;
+  canvas.addEventListener("mousedown", e => {
+    dragging = true; moved = 0; lastX = e.offsetX; lastY = e.offsetY;
+  });
+  window.addEventListener("mouseup", e => {
+    if (!dragging) return;
+    dragging = false;
+    if (moved < 4) {
+      const id = nearest(e.target === canvas ? e.offsetX : lastX,
+                         e.target === canvas ? e.offsetY : lastY);
+      if (id >= 0) select(id, false);
+    }
+  });
+  canvas.addEventListener("mousemove", e => {
+    if (dragging) {
+      const dx = e.offsetX - lastX, dy = e.offsetY - lastY;
+      moved += Math.abs(dx) + Math.abs(dy);
+      view.tx += dx; view.ty += dy;
+      lastX = e.offsetX; lastY = e.offsetY;
+      scheduleDraw();
+      return;
+    }
+    const h = nearest(e.offsetX, e.offsetY);
+    if (h !== hovered) {
+      hovered = h;
+      canvas.style.cursor = h >= 0 ? "pointer" : "default";
+      footer();
+      scheduleDraw();
+    }
+  });
+  canvas.addEventListener("mouseleave", () => {
+    if (hovered !== -1) { hovered = -1; footer(); scheduleDraw(); }
+  });
+  // drill gestures: dblclick a dir label = drill into that dir; dblclick a
+  // point = drill into its file; Escape = up one level (hitlist first)
+  canvas.addEventListener("dblclick", e => {
+    if (mode === "map") {
+      const b = labelBoxes.find(b =>
+        b.path && e.offsetX >= b.x0 && e.offsetX <= b.x1 && e.offsetY >= b.y0 && e.offsetY <= b.y1);
+      if (b) { drillTo(b.path); return; }
+    }
+    const id = nearest(e.offsetX, e.offsetY);
+    if (id >= 0 && (!drill || drill.path !== S[id].file)) drillTo(S[id].file);
+  });
+  document.addEventListener("keydown", e => {
+    if (e.key !== "Escape" || e.target === $("search")) return;
+    if (!$("hitlist").hidden) { $("hitlist").hidden = true; return; }
+    drillUp();
+  });
+  canvas.addEventListener("wheel", e => {
+    e.preventDefault();
+    const f = Math.exp(-e.deltaY * 0.0015);
+    const k2 = Math.min(80, Math.max(0.25, view.k * f));
+    const mx = e.offsetX, my = e.offsetY;
+    view.tx = mx - (mx - view.tx) * (k2 / view.k);
+    view.ty = my - (my - view.ty) * (k2 / view.k);
+    view.k = k2;
+    scheduleDraw();
+  }, {passive: false});
+
+  new ResizeObserver(() => scheduleDraw()).observe($("stage"));
+  if (window.matchMedia) {
+    window.matchMedia("(prefers-color-scheme: light)")
+      .addEventListener("change", () => scheduleDraw());
+  }
+}
+
+// Stamp each PCA axis with its explained-variance share (real eigenvalue
+// shares of total variance, from /api/meta) — the axes picker says what
+// each component is worth before it is chosen.
+function pcaAxisLabels() {
+  for (let c = 0; c < 8; c++) {
+    const v = META.pca_var[c];
+    if (v === undefined) continue;
+    const p = v * 100;
+    const label = `PCA-${c + 1} · ${p >= 9.5 ? Math.round(p) : p.toFixed(1)}% var`;
+    AXES.find(a => a.id === "pca" + c).label = label;
+    for (const selId of ["ax", "ay"]) {
+      for (const o of $(selId).options) {
+        if (o.value === "pca" + c) o.textContent = label;
+      }
+    }
+  }
+}
+
+async function boot() {
+  initControls();
+  const [rs, rm] = await Promise.all([fetch("/api/symbols"), fetch("/api/meta")]);
+  const [symbols, meta] = await Promise.all([rs.json(), rm.json()]);
+  // assign together, synchronously with layout() below: a resize- or
+  // mousemove-scheduled draw must never see S populated but px/py unbuilt
+  S = symbols;
+  META = meta;
+  pcaAxisLabels();
+  prep();
+  syncViews();
+  renderGuide();
+  layout();
+  fitView();
+  footer();
+  draw();
+}
+boot();
+</script>
+</body>
+</html>

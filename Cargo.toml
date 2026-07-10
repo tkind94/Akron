@@ -1,0 +1,44 @@
+[package]
+name = "akron"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["semantic"]
+# `akron find` (TKI-41 / EXP-A): symbol-level semantic search. The one
+# sanctioned exception to DESIGN.md §1.2's no-learned-model rule. Optional so
+# a build can drop fastembed/ort (and their download-at-build-time C/ONNX
+# runtime deps) entirely — see scripts/release.sh for the musl target.
+semantic = ["dep:fastembed", "dep:sha2", "dep:tiny_http"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+gix = "0.85"
+# SIGPIPE reset only (main.rs) — already pulled in transitively by several
+# deps above, so this promotes it to direct rather than adding real weight.
+libc = "0.2"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tree-sitter = "0.25"
+tree-sitter-python = "0.23"
+walkdir = "2"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+# default-features = false drops fastembed's `image-models` default — a
+# text-only embedder has no business building the image/AVIF encode stack.
+fastembed = { version = "5", optional = true, default-features = false, features = [
+    "ort-download-binaries-native-tls",
+    "hf-hub-native-tls",
+] }
+sha2 = { version = "0.10", optional = true }
+# `akron explore`'s local HTTP server (TKI-47). tiny_http: synchronous,
+# thread-per-nothing (we serve from one loop), three small pure-Rust deps —
+# no tokio/hyper tree for a localhost single-user tool.
+tiny_http = { version = "0.12", optional = true }
+
+[profile.release]
+lto = true
+
+[dev-dependencies]
+tempfile = "3"
