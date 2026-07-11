@@ -100,15 +100,22 @@ pub fn minhash(labels: impl Iterator<Item = u64> + Clone) -> Vec<u64> {
         .collect()
 }
 
-/// Cosine over two sorted sparse vectors.
-pub fn cosine(a: &[(u64, f32)], b: &[(u64, f32)]) -> f32 {
-    let (mut i, mut j, mut dot, mut na, mut nb) = (0, 0, 0.0f32, 0.0f32, 0.0f32);
-    for &(_, w) in a {
-        na += w * w;
-    }
-    for &(_, w) in b {
-        nb += w * w;
-    }
+/// Sum of squared weights of a sorted sparse vector — the un-square-rooted
+/// half of `cosine`'s norm that depends on only one side. Hoisting this out
+/// of a candidate-pair loop (compute once per vector instead of once per
+/// pair) is bit-identical to the norm `cosine` computes inline: same
+/// summation order, just memoized (`cluster.rs`'s shape-clustering and
+/// vocabulary candidate loops re-touch the same vectors across many pairs).
+pub fn norm_sq<K: Copy>(v: &[(K, f32)]) -> f32 {
+    v.iter().map(|&(_, w)| w * w).sum()
+}
+
+/// Cosine given precomputed (squared) norms — the merge-join dot product
+/// only. `cosine(a, b) == cosine_with_norms(a, b, norm_sq(a), norm_sq(b))`
+/// bit-for-bit; used where the same vector's norm is reused across many
+/// pairs.
+pub fn cosine_with_norms<K: Ord + Copy>(a: &[(K, f32)], b: &[(K, f32)], na: f32, nb: f32) -> f32 {
+    let (mut i, mut j, mut dot) = (0, 0, 0.0f32);
     while i < a.len() && j < b.len() {
         match a[i].0.cmp(&b[j].0) {
             std::cmp::Ordering::Less => i += 1,
@@ -124,6 +131,14 @@ pub fn cosine(a: &[(u64, f32)], b: &[(u64, f32)]) -> f32 {
         return 0.0;
     }
     dot / (na.sqrt() * nb.sqrt())
+}
+
+/// Cosine over two sorted sparse vectors, keyed by any `Ord` key (WL labels
+/// are `u64`, vocabulary term ids are `u32` — genericizing over the key type
+/// avoids a throwaway copy-and-widen at every call site that only had `u32`
+/// keys, e.g. `cluster.rs`'s vocabulary cosine).
+pub fn cosine<K: Ord + Copy>(a: &[(K, f32)], b: &[(K, f32)]) -> f32 {
+    cosine_with_norms(a, b, norm_sq(a), norm_sq(b))
 }
 
 #[cfg(test)]
