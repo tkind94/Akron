@@ -1,7 +1,7 @@
 use akron::report::Section;
 use akron::run;
 use akron::types::Config;
-use akron::{explain, find, report};
+use akron::{explain, find, report, review};
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::fs;
@@ -30,6 +30,13 @@ enum Cli {
     /// per-anchor channel cosines, dates). Read-only, serves until killed.
     /// Requires a build with the `semantic` feature; exits 2 otherwise.
     Explore(ExploreArgs),
+    /// A deterministic evidence surface for reviewing a diff range (TKI-63):
+    /// for each branch-new/changed symbol vs `--base`, where it sits,
+    /// nearest-existing siblings (deterministic channels only), co-change
+    /// partners outside the diff, and pattern prevalence. Facts only — no
+    /// verdicts. `nearest_existing` degrades to empty (honestly) without the
+    /// `semantic` feature; everything else works either way.
+    Review(ReviewArgs),
 }
 
 /// Engine knobs shared by every subcommand.
@@ -160,6 +167,24 @@ struct ExploreArgs {
     base: Option<String>,
 }
 
+/// `akron review <path> [--base <ref>]` — same `<path>` convention as the
+/// other verbs; `--base` follows `explore`'s convention (default: the
+/// repo's default branch).
+#[derive(clap::Args)]
+struct ReviewArgs {
+    /// Repo root to review
+    path: PathBuf,
+    /// Base ref to diff against (default: the repo's default branch —
+    /// origin/HEAD if set, else main, else master)
+    #[arg(long)]
+    base: Option<String>,
+    /// Emit the report as versioned JSON instead of the text rendering.
+    /// Bare `--json` (or `--json -`) writes to stdout; any other value is a
+    /// file path.
+    #[arg(long, num_args = 0..=1, default_missing_value = "-")]
+    json: Option<PathBuf>,
+}
+
 fn main() -> Result<()> {
     // Rust sets SIGPIPE to SIG_IGN at startup, so a write to a closed pipe
     // (e.g. `akron explain ... | head`) surfaces as an `io::Error` instead
@@ -195,6 +220,16 @@ fn main() -> Result<()> {
         // Same discipline as find: feature disabled, model/network trouble,
         // a bad path, a busy port — all operational errors, exit 2.
         Cli::Explore(args) => match run_explore(args) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                eprintln!("{e:#}");
+                std::process::exit(2);
+            }
+        },
+        // Same discipline: not-a-repo / bad --base are the only operational
+        // errors (exit 2); "no changed symbols" is a normal Ok result (exit
+        // 0) — see review.rs's module doc "Exit discipline".
+        Cli::Review(args) => match run_review(args) {
             Ok(()) => Ok(()),
             Err(e) => {
                 eprintln!("{e:#}");
@@ -331,6 +366,31 @@ fn run_find(args: FindArgs) -> Result<()> {
             eprintln!("wrote {}", path.display());
         }
         None => find::render_text(&report),
+    }
+    Ok(())
+}
+
+/// `akron review <path> [--base <ref>]` — same JSON/stdout-or-file
+/// convention as `find`'s `--json`.
+fn run_review(args: ReviewArgs) -> Result<()> {
+    let root = args
+        .path
+        .canonicalize()
+        .with_context(|| format!("no such path: {}", args.path.display()))?;
+
+    let report = review::review(&root, args.base.as_deref())?;
+
+    match args.json.as_deref() {
+        Some(path) if path == Path::new("-") => {
+            println!("{}", serde_json::to_string_pretty(&review::render_json(&report))?);
+        }
+        Some(path) => {
+            let v = review::render_json(&report);
+            fs::write(path, serde_json::to_vec_pretty(&v)?)
+                .with_context(|| format!("writing {}", path.display()))?;
+            eprintln!("wrote {}", path.display());
+        }
+        None => review::render_text(&report),
     }
     Ok(())
 }
