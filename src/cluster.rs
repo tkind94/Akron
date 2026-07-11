@@ -1,7 +1,7 @@
 //! LSH candidate pairing + union-find clustering for Channel A, and the
 //! tf-idf vocabulary index for Channel B.
 
-use crate::fingerprint::{cosine, MINHASH_FNS};
+use crate::fingerprint::{cosine_with_norms, norm_sq, MINHASH_FNS};
 use crate::types::SymbolPrint;
 use std::collections::{HashMap, HashSet};
 use xxhash_rust::xxh3::xxh3_64;
@@ -11,6 +11,11 @@ use xxhash_rust::xxh3::xxh3_64;
 // is restored downstream by the WL-cosine threshold, not by the LSH.
 const LSH_BANDS: usize = 32;
 const LSH_ROWS: usize = MINHASH_FNS / LSH_BANDS;
+/// Fixed size of a banding key (one band byte + `LSH_ROWS` `u64`s): a
+/// compile-time constant, so the key can live on the stack instead of a
+/// fresh heap `Vec` per (symbol, band) — profiled allocation hot spot
+/// (TKI-58): this loop runs `symbols.len() * LSH_BANDS` times.
+const LSH_KEY_LEN: usize = 1 + LSH_ROWS * 8;
 /// Buckets larger than this are generic shapes (e.g. tiny wrappers); pairing
 /// them is quadratic noise. Logged, not silent (DESIGN.md: no silent caps).
 const MAX_BUCKET: usize = 200;
@@ -105,6 +110,12 @@ pub fn shape_clusters(symbols: &[SymbolPrint], theta_clone: f32) -> ShapeCluster
     let n = symbols.len();
     let mut uf = UnionFind::new(n);
 
+    // Each symbol's WL-vector norm, computed once and reused across every
+    // candidate pair it appears in below — bit-identical to `cosine`'s
+    // inline norm (same summation order), just memoized instead of
+    // recomputed per pair (profiled hot spot: TKI-58).
+    let wl_norm_sq: Vec<f32> = symbols.iter().map(|s| norm_sq(&s.wl)).collect();
+
     // Exact structural clones: same Merkle root (identical, no guard needed).
     let mut by_root: HashMap<u64, u32> = HashMap::new();
     for (i, s) in symbols.iter().enumerate() {
@@ -120,10 +131,11 @@ pub fn shape_clusters(symbols: &[SymbolPrint], theta_clone: f32) -> ShapeCluster
     let mut buckets: HashMap<u64, Vec<u32>> = HashMap::new();
     for (i, s) in symbols.iter().enumerate() {
         for band in 0..LSH_BANDS {
-            let mut key = Vec::with_capacity(LSH_ROWS * 8 + 1);
-            key.push(band as u8);
+            let mut key = [0u8; LSH_KEY_LEN];
+            key[0] = band as u8;
             for r in 0..LSH_ROWS {
-                key.extend_from_slice(&s.minhash[band * LSH_ROWS + r].to_le_bytes());
+                let bytes = s.minhash[band * LSH_ROWS + r].to_le_bytes();
+                key[1 + r * 8..1 + (r + 1) * 8].copy_from_slice(&bytes);
             }
             buckets.entry(xxh3_64(&key)).or_default().push(i as u32);
         }
@@ -156,7 +168,7 @@ pub fn shape_clusters(symbols: &[SymbolPrint], theta_clone: f32) -> ShapeCluster
                     continue;
                 }
                 survived_guards += 1;
-                let c = cosine(&sa.wl, &sb.wl);
+                let c = cosine_with_norms(&sa.wl, &sb.wl, wl_norm_sq[a as usize], wl_norm_sq[b as usize]);
                 if c >= theta_clone {
                     cands.push((c, pair.0, pair.1));
                 }
@@ -189,7 +201,13 @@ pub fn shape_clusters(symbols: &[SymbolPrint], theta_clone: f32) -> ShapeCluster
             continue;
         }
         let (pa, pb) = (rep[ra as usize], rep[rb as usize]);
-        if cosine(&symbols[pa as usize].wl, &symbols[pb as usize].wl) < theta_clone * REP_RELAX {
+        if cosine_with_norms(
+            &symbols[pa as usize].wl,
+            &symbols[pb as usize].wl,
+            wl_norm_sq[pa as usize],
+            wl_norm_sq[pb as usize],
+        ) < theta_clone * REP_RELAX
+        {
             continue;
         }
         survived_cosine += 1;
@@ -231,6 +249,11 @@ pub struct VocabIndex {
     pub vecs: Vec<Vec<(u32, f32)>>,
     pub terms: Vec<String>,
     postings: HashMap<u32, Vec<u32>>, // term_id -> symbol ids, mid-df terms only
+    /// Each `vecs[i]`'s squared norm, precomputed once so the candidate-pair
+    /// cosine loops below (`similar_pairs`, `cosine_between`) don't recompute
+    /// it per pair — bit-identical to `cosine`'s inline norm (profiled hot
+    /// spot: TKI-58).
+    norm_sq: Vec<f32>,
 }
 
 /// Terms in more than this fraction of symbols don't discriminate enough to
@@ -301,10 +324,13 @@ pub fn vocab_index(symbols: &[SymbolPrint]) -> VocabIndex {
         }
     }
 
+    let vec_norm_sq: Vec<f32> = vecs.iter().map(|v| norm_sq(v)).collect();
+
     VocabIndex {
         vecs,
         terms,
         postings,
+        norm_sq: vec_norm_sq,
     }
 }
 
@@ -321,7 +347,12 @@ impl VocabIndex {
                     if !seen.insert(pair) {
                         continue;
                     }
-                    let c = cosine(&self.to_u64(pair.0), &self.to_u64(pair.1));
+                    let c = cosine_with_norms(
+                        &self.vecs[pair.0 as usize],
+                        &self.vecs[pair.1 as usize],
+                        self.norm_sq[pair.0 as usize],
+                        self.norm_sq[pair.1 as usize],
+                    );
                     if c >= theta_b {
                         out.push((pair.0, pair.1, c));
                     }
@@ -329,13 +360,6 @@ impl VocabIndex {
             }
         }
         out
-    }
-
-    fn to_u64(&self, i: u32) -> Vec<(u64, f32)> {
-        self.vecs[i as usize]
-            .iter()
-            .map(|&(id, w)| (id as u64, w))
-            .collect()
     }
 
     /// Top shared terms between two symbols, by combined weight.
@@ -369,7 +393,12 @@ impl VocabIndex {
     /// Channel B cosine between two symbols by id (thin wrapper over the
     /// same sorted-sparse-vector cosine `similar_pairs` uses internally).
     pub fn cosine_between(&self, a: u32, b: u32) -> f32 {
-        cosine(&self.to_u64(a), &self.to_u64(b))
+        cosine_with_norms(
+            &self.vecs[a as usize],
+            &self.vecs[b as usize],
+            self.norm_sq[a as usize],
+            self.norm_sq[b as usize],
+        )
     }
 
     /// Every shared term between two symbols (id, combined weight = the
