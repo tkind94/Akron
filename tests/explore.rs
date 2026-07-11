@@ -48,7 +48,16 @@ fn fixture_state_with(branch: Option<BranchInfo>) -> ExploreState {
     let analysis = run::analyze(&fixtures_root(), &cfg);
     let n = analysis.scanned.symbols.len();
     assert!(n > 0, "fixtures must yield symbols at min_nodes=8");
-    explore::state_from("fixtures", cfg, analysis, synthetic_embeddings(n, 24), false, branch)
+    let docs = explore::scan_file_docs(&fixtures_root());
+    explore::state_from(
+        "fixtures",
+        cfg,
+        analysis,
+        synthetic_embeddings(n, 24),
+        docs,
+        false,
+        branch,
+    )
 }
 
 /// A synthetic branch context marking `clone_original.py` as the one changed
@@ -276,8 +285,16 @@ fn drill_tree_state() -> (tempfile::TempDir, ExploreState) {
     let analysis = run::analyze(dir.path(), &cfg);
     let n = analysis.scanned.symbols.len();
     assert_eq!(n, 7, "the planted tree yields all 7 symbols");
-    let state =
-        explore::state_from("drill", cfg, analysis, synthetic_embeddings(n, 24), false, None);
+    let docs = explore::scan_file_docs(dir.path());
+    let state = explore::state_from(
+        "drill",
+        cfg,
+        analysis,
+        synthetic_embeddings(n, 24),
+        docs,
+        false,
+        None,
+    );
     (dir, state)
 }
 
@@ -374,6 +391,89 @@ fn meta_endpoint_is_byte_identical_across_two_state_builds() {
     let a = explore::respond(&fixture_state(), "/api/meta");
     let b = explore::respond(&fixture_state(), "/api/meta");
     assert_eq!(a.body, b.body, "/api/meta must be deterministic");
+}
+
+// ── module-docstring prevalence (TKI-56) ──
+
+#[test]
+fn meta_endpoint_carries_one_file_doc_row_per_scanned_file() {
+    let state = fixture_state();
+    let v = json(&explore::respond(&state, "/api/meta"));
+    let rows = v["file_docs"].as_array().expect("file_docs array present");
+    // Fixture ground truth (checked by reading the files): 15 planted
+    // fixtures, 13 open with a bare `"""..."""` docstring; the two
+    // `todict_*.py` fixtures start directly with `def to_dict...`.
+    assert_eq!(rows.len(), 15, "one row per scanned fixture file");
+    let with_doc = rows.iter().filter(|r| r["doc"] == true).count();
+    assert_eq!(with_doc, 13, "13 of 15 fixtures open with a module docstring");
+    for undocumented in ["todict_core.py", "todict_member.py"] {
+        let row = rows.iter().find(|r| r["file"] == undocumented).expect("row present");
+        assert_eq!(row["doc"], false, "{undocumented} has no module docstring");
+    }
+    let documented = rows.iter().find(|r| r["file"] == "clone_original.py").expect("row present");
+    assert_eq!(documented["doc"], true);
+    assert_eq!(documented["is_test"], false);
+}
+
+#[test]
+fn has_module_docstring_true_for_plain_string_after_comments_and_blanks() {
+    let src = b"# -*- coding: utf-8 -*-\n# a header comment\n\n\"\"\"real docstring\"\"\"\ndef f():\n    pass\n";
+    assert!(explore::has_module_docstring(src));
+}
+
+#[test]
+fn has_module_docstring_true_for_single_quoted_and_literal_braces() {
+    let src = b"'''use {} braces literally, no interpolation'''\nx = 1\n";
+    assert!(explore::has_module_docstring(src));
+}
+
+#[test]
+fn has_module_docstring_false_when_comment_only_header_precedes_code() {
+    // A comment-only file header is not a docstring: no string statement at all.
+    let src = b"# just a header, no docstring\ndef f():\n    pass\n";
+    assert!(!explore::has_module_docstring(src));
+}
+
+#[test]
+fn has_module_docstring_false_for_future_import_before_a_string() {
+    // `from __future__ import` is a real statement — it blocks the string
+    // behind it from being the first statement, exactly like CPython's own
+    // `__doc__` assignment rule.
+    let src = b"from __future__ import annotations\n\"\"\"not a docstring\"\"\"\n";
+    assert!(!explore::has_module_docstring(src));
+}
+
+#[test]
+fn has_module_docstring_true_when_docstring_precedes_future_import() {
+    let src = b"\"\"\"real docstring\"\"\"\nfrom __future__ import annotations\n";
+    assert!(explore::has_module_docstring(src));
+}
+
+#[test]
+fn has_module_docstring_false_for_f_string_first_statement() {
+    // An f-string is never assigned to `__doc__`, even with no `{}` inside.
+    let src = b"f\"\"\"looks like a docstring but is an f-string\"\"\"\n";
+    assert!(!explore::has_module_docstring(src));
+}
+
+#[test]
+fn has_module_docstring_false_for_f_string_with_interpolation() {
+    let name = "x";
+    let src = format!("f\"hello {{{name}}}\"\n");
+    assert!(!explore::has_module_docstring(src.as_bytes()));
+}
+
+#[test]
+fn has_module_docstring_false_for_empty_file() {
+    assert!(!explore::has_module_docstring(b""));
+}
+
+#[test]
+fn has_module_docstring_false_when_expression_is_not_a_bare_string() {
+    // A string that's part of a larger expression (concatenation, a call
+    // argument, an assignment) is not a bare string statement.
+    assert!(!explore::has_module_docstring(b"x = \"not a docstring\"\n"));
+    assert!(!explore::has_module_docstring(b"print(\"not a docstring\")\n"));
 }
 
 // ── branch highlighting (TKI-53) ──

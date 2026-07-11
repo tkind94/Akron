@@ -1200,6 +1200,24 @@ function prep() {
 /* ── guidance (TKI-54): factual starting points for the current scope ──
    Counts and dates only — akron shows structure, it never judges it.
    Scope-aware: inside a drill every section re-derives over the members. */
+// Convention prevalence (TKI-56): module-docstring count for the current
+// scope — root = every scanned file, a dir drill = that dir's files (`/`
+// segment-bounded, matching the server's own prefix rule), a file drill has
+// no prevalence to report. Scoped from META.file_docs the same way the
+// other guide facts scope from S: client-side filtering over an immutable
+// per-file list, no extra request.
+function docFact() {
+  if (drill && drill.kind === "file") return null;
+  const prefix = drill ? `${drill.path}/` : null;
+  const files = (META.file_docs || []).filter(f => {
+    if (!showTests && f.is_test) return false;
+    if (!drill) return true;
+    return f.file === drill.path || f.file.startsWith(prefix);
+  });
+  if (!files.length) return null;
+  return { withDoc: files.filter(f => f.doc).length, total: files.length };
+}
+
 function renderGuide() {
   const card = $("card");
   card.className = "";
@@ -1212,6 +1230,18 @@ function renderGuide() {
   loc.className = "loc";
   loc.textContent = `${drill ? drill.path : BOOT.repo} · ${scope.length} symbols shown`;
   card.appendChild(loc);
+
+  // Plain descriptive count, not a clickable row — there is no obviously
+  // useful action to bind (see TKI-56: never flag the minority as wrong).
+  const docs = docFact();
+  if (docs) {
+    card.appendChild(listSection("module docstring", null, sec => {
+      const p = document.createElement("div");
+      p.className = "loc";
+      p.textContent = `${docs.withDoc} of ${docs.total} files`;
+      sec.appendChild(p);
+    }));
+  }
 
   const section = (title, dim, rows) => {
     if (!rows.length) return; // no fact, no section
