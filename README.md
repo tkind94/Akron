@@ -18,6 +18,20 @@ graded before shipping against a real alternative (grep, manual reading):
 | [`explain`](#explain--one-card-per-symbol-what-is-this-thing) | what is this thing | shipped |
 | [`explore`](#explore--the-live-map-what-neighborhoods-does-this-codebase-have) | what neighborhoods does this codebase have | shipped |
 
+## Quickstart
+
+```
+git clone https://github.com/tkind94/Akron.git && cd Akron
+cargo build --release
+./target/release/akron explore .
+```
+
+First `find`/`explore` on a repo pulls a ~331 MB embedding model once (from
+Hugging Face, under its own terms — see [`find`](#find--semantic-search-what-am-i-looking-for)
+below) and cold-indexes the repo: ~1–2 minutes and ~2.2 GB peak RSS the first
+time, ~2 s for warm queries after. Performance and quality validation so far
+is arm64 macOS only — see [Honest scope](#honest-scope).
+
 `scan` — the shape/vocabulary engine behind all three — is no longer a human
 verb; see [For tooling](#for-tooling-scan---json) below.
 
@@ -221,13 +235,17 @@ Other current limits, honest not aspirational:
   inherited from its file's git history, not its own hunks — every symbol in
   a file is dated identically until symbol-precise (blame-based) dating
   lands.
+- **arm64 macOS only, so far.** Every performance and quality number in this
+  README was measured there; cold indexing peaks at ~2.2 GB RSS (the
+  embedding model held in memory). Other targets build and run (see Install)
+  but aren't yet measured.
 
 ## Install
 
 There is no `cargo install` or Homebrew tap yet. Build from source:
 
 ```
-git clone <this repo> && cd akron
+git clone https://github.com/tkind94/Akron.git && cd Akron
 cargo build --release
 ./target/release/akron explore .
 ```

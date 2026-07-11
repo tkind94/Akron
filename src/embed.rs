@@ -100,9 +100,12 @@ pub struct Embedder(TextEmbedding);
 
 impl Embedder {
     /// Load the pinned model, pulling it into `models_dir()` on first use.
-    /// Prints one terse stderr line only when actually pulling (silent on a
-    /// warm cache). Network failure or a missing model offline surfaces as
-    /// `Err` — the caller (`find::search`) turns that into exit 2.
+    /// Prints a terse stderr notice — what's downloading, how big, where
+    /// from, where it lands, that it's one-time, and a pointer to the
+    /// model's own terms — only when actually pulling (silent on a warm
+    /// cache), used by both `find` and `explore` since both go through this
+    /// one loader. Network failure or a missing model offline surfaces as
+    /// `Err` — the caller turns that into exit 2.
     pub fn load() -> Result<Self> {
         let dir = models_dir();
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -121,13 +124,20 @@ impl Embedder {
         }
         if !all_pre_verified {
             eprintln!(
-                "akron: pulling model {MODEL_KEY} (~{APPROX_DOWNLOAD_MB} MB) -> {}",
+                "akron: first run — pulling {MODEL_KEY} (~{APPROX_DOWNLOAD_MB} MB) from Hugging Face -> {}",
                 dir.display()
             );
+            eprintln!(
+                "akron: one-time; cached there for future runs, pulled under the model's own Gemma Terms of Use (https://ai.google.dev/gemma/terms) — akron redistributes nothing"
+            );
         }
+        // hf-hub draws a per-file progress bar (indicatif, stderr) when this
+        // is true — only worth paying for when we know a pull is happening;
+        // a warm cache never calls hf-hub's download path at all, so this
+        // flag is a no-op there either way.
         let opts = TextInitOptions::new(MODEL_VARIANT)
             .with_cache_dir(dir.clone())
-            .with_show_download_progress(false);
+            .with_show_download_progress(!all_pre_verified);
         let model = TextEmbedding::try_new(opts).with_context(|| {
             format!(
                 "loading embedding model {MODEL_KEY} (network unreachable, or not cached and offline)"
@@ -144,6 +154,7 @@ impl Embedder {
                 }
                 verify_matches(&dir, &matches, name, sha)?;
             }
+            eprintln!("akron: model cached — subsequent runs use the local copy");
         }
         Ok(Embedder(model))
     }
