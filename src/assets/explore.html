@@ -155,6 +155,24 @@ main.hasSel { grid-template-columns: 1fr minmax(420px, 46%); }
 #stage { position: relative; min-width: 0; }
 #map { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 
+/* ── hover tooltip (TKI-66): identity at the cursor; never a hit target ── */
+#tip {
+  position: absolute;
+  z-index: 15;
+  pointer-events: none;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 4px 8px;
+  max-width: 360px;
+  box-shadow: 0 4px 12px rgba(0,0,0,.3);
+}
+#tip[hidden] { display: none; }
+#tip .t-name { font-weight: 700; word-break: break-all; }
+#tip .t-loc { color: var(--dim); word-break: break-all; }
+#tip .t-terms { color: var(--accent); word-break: break-all; }
+#tip .t-hint { color: var(--dim); }
+
 /* ── side panel ── */
 #panel {
   border-left: 1px solid var(--line);
@@ -167,7 +185,8 @@ main.hasSel { grid-template-columns: 1fr minmax(420px, 46%); }
 #panel h2 .ctx { color: var(--dim); font-weight: 400; }
 #panel .loc { color: var(--dim); }
 #panel .loc .pathseg { cursor: pointer; }
-#panel .loc .pathseg:hover { color: var(--accent); }
+/* drill affordance (TKI-66): path segments visibly act on hover */
+#panel .loc .pathseg:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
 #panel .meta { margin-top: 3px; }
 #panel .meta .k { color: var(--dim); }
 #panel section { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
@@ -198,6 +217,13 @@ main.hasSel { grid-template-columns: 1fr minmax(420px, 46%); }
 }
 #panel li.cos-row { grid-template-columns: minmax(0, 1fr) auto 4ch; }
 #panel li.cos-row2 { grid-template-columns: minmax(0, 1fr) auto 4ch 4ch; }
+/* per-row compare action (TKI-66): one extra column when present */
+#panel li.has-cmp { grid-template-columns: minmax(0, 1fr) auto auto; }
+#panel li.cos-row.has-cmp { grid-template-columns: minmax(0, 1fr) auto 4ch auto; }
+#panel li.cos-row2.has-cmp { grid-template-columns: minmax(0, 1fr) auto 4ch 4ch auto; }
+#panel li .cmpgo { color: var(--dim); cursor: pointer; visibility: hidden; }
+#panel li:hover .cmpgo { visibility: visible; }
+#panel li .cmpgo:hover { color: var(--accent); }
 #panel li:hover { background: var(--bg); }
 #panel li .name {
   font-weight: 600;
@@ -322,11 +348,12 @@ footer {
 </header>
 <div id="chips"></div>
 <main>
-  <div id="stage"><canvas id="map"></canvas></div>
+  <div id="stage"><canvas id="map"></canvas><div id="tip" hidden></div></div>
   <aside id="panel"><div class="empty" id="card">no selection — click a symbol</div></aside>
   <div id="cmp" hidden>
     <div id="cmpbar">
       <button class="chipbtn" id="cmpclose">✕ close</button>
+      <button class="chipbtn" id="cmppick" title="pick a new B side from the map or search">change comparison</button>
       <span id="cmptitle"></span>
       <span class="legend">solid — identical after whitespace collapse · dotted — aligned, differs · hover pairs</span>
     </div>
@@ -355,7 +382,7 @@ const AXES = [
   {id:"pca4", label:"PCA-5"}, {id:"pca5", label:"PCA-6"},
   {id:"pca6", label:"PCA-7"}, {id:"pca7", label:"PCA-8"},
 ];
-const DEFAULT_HINT = "drag pan · wheel zoom · click select · dblclick drill in · esc back / drill up";
+const DEFAULT_HINT = "drag pan · wheel zoom · click select · double-click a dot/label opens its file/dir · esc back / drill up";
 
 let S = [];                 // /api/symbols
 let META = {pca_var: [], labels: {prod: [], full: []}}; // /api/meta
@@ -373,7 +400,12 @@ let drill = null;           // /api/sublayout payload + set/slot indexes; null =
 let visited = new Set();    // ids selected this session (guidance: "next")
 let navStack = [];          // back-history of selections (viewer loop, TKI-61)
 let cmp = null;             // /api/compare payload while the overlay is open
+let picking = -1;           // compare pick mode (TKI-66): the A-side id, or -1
 let labelBoxes = [];        // dir labels placed this frame, for dblclick drill
+let mouse = null;           // last cursor position; hover hit-tests run per rAF
+let edgeHover = null;       // {a, b} — the labeled layout edge under the cursor
+let hoverLabel = null;      // the drillable island label under the cursor
+const edgeTerms = new Map(); // "lo:hi" -> shared terms (/api/edge, cached)
 let mode = "map";           // map | anchor | time | axes
 let axisX = "map_x", axisY = "map_y";
 let px, py;                 // Float64Array world coords in [0,1]
@@ -528,11 +560,25 @@ function draw() {
     }
   }
 
-  // map mode: island labels + the selection's layout edges, under the points
+  // map mode: island labels + the selection's layout edges, under the
+  // points; hovering a point pre-highlights ITS edges at reduced opacity
+  // (what a click would fan out), and the edge under the cursor draws hot
   if (mode === "map") {
     drawDirLabels(W, H, dimInk);
     if (hovered >= 0 && hovered !== selected && visible(S[hovered])) drawEdges(hovered, 0.25, accent);
     if (selected >= 0 && visible(S[selected])) drawEdges(selected, 0.6, accent);
+    if (edgeHover && visible(S[edgeHover.a]) && visible(S[edgeHover.b])) {
+      const [x0, y0] = screenXY(edgeHover.a);
+      const [x1, y1] = screenXY(edgeHover.b);
+      ctx.globalAlpha = 0.9;
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
   }
 
   for (let i = 0; i < S.length; i++) {
@@ -830,6 +876,12 @@ function breadcrumb() {
 /* ── footer readout ── */
 function footer() {
   const el = $("readout");
+  if (picking >= 0) {
+    el.textContent = hovered >= 0
+      ? `pick B side: ${S[hovered].qname}`
+      : `pick comparison — click a map point or search hit for the B side (A: ${S[picking].qname}) · esc cancels`;
+    return;
+  }
   if (hovered >= 0) {
     const s = S[hovered];
     const parts = [s.qname, `${s.file}:${s.line}`];
@@ -880,8 +932,126 @@ function nearest(mx, my) {
   return best >= 0 && bestD <= Math.max(9, radii[best] + 3) ? best : -1;
 }
 
+/* ── hover identity (TKI-66): point tooltip, edge labels, drill hints ── */
+// The selection's layout edge nearest the cursor (perpendicular distance
+// ≤ 6 px), or -1. Only the ≤k edges of the selection are tested.
+function nearestEdge(i, mx, my) {
+  const [x0, y0] = screenXY(i);
+  let best = -1, bestD = 6;
+  for (const j of neighborsOf(i)) {
+    if (!visible(S[j])) continue;
+    const [x1, y1] = screenXY(j);
+    const dx = x1 - x0, dy = y1 - y0;
+    const len2 = dx * dx + dy * dy;
+    if (!len2) continue;
+    const t = Math.max(0, Math.min(1, ((mx - x0) * dx + (my - y0) * dy) / len2));
+    const d = Math.hypot(mx - (x0 + t * dx), my - (y0 + t * dy));
+    if (d < bestD) { bestD = d; best = j; }
+  }
+  return best;
+}
+function sameEdge(a, b) { return (!a && !b) || (a && b && a.a === b.a && a.b === b.b); }
+
+// Fetch-once cache for /api/edge — the shared Channel-B vocabulary that a
+// layout edge is made of. Refreshes the tooltip when the answer lands.
+function ensureEdgeTerms(e) {
+  const key = e.a < e.b ? `${e.a}:${e.b}` : `${e.b}:${e.a}`;
+  if (edgeTerms.has(key)) return;
+  edgeTerms.set(key, null); // in flight
+  fetch(`/api/edge?a=${e.a}&b=${e.b}`)
+    .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+    .then(j => { edgeTerms.set(key, j.terms || []); tooltip(); })
+    .catch(() => edgeTerms.delete(key));
+}
+function edgeTermText(e) {
+  const key = e.a < e.b ? `${e.a}:${e.b}` : `${e.b}:${e.a}`;
+  const t = edgeTerms.get(key);
+  if (t === undefined || t === null) return "…";
+  return t.length ? t.join(" · ") : "no shared vocabulary";
+}
+
+// One hover pass per animation frame: point first (existing hit rule), then
+// drillable island labels, then the selection's edge lines.
+function hoverUpdate() {
+  if (!mouse) return;
+  const h = nearest(mouse.x, mouse.y);
+  let lb = null, edge = null;
+  if (mode === "map" && h < 0) {
+    lb = labelBoxes.find(b =>
+      b.path && mouse.x >= b.x0 && mouse.x <= b.x1 && mouse.y >= b.y0 && mouse.y <= b.y1) || null;
+  }
+  if (mode === "map" && selected >= 0 && visible(S[selected])) {
+    if (h >= 0 && h !== selected && neighborsOf(selected).includes(h)) {
+      edge = {a: selected, b: h}; // hovering a neighbor endpoint labels its edge
+    } else if (h < 0 && !lb) {
+      const j = nearestEdge(selected, mouse.x, mouse.y);
+      if (j >= 0) edge = {a: selected, b: j};
+    }
+  }
+  const changed = h !== hovered || !sameEdge(edge, edgeHover) || lb !== hoverLabel;
+  hovered = h;
+  edgeHover = edge;
+  hoverLabel = lb;
+  canvas.style.cursor = h >= 0 ? "pointer" : lb ? "zoom-in" : "default";
+  if (edge) ensureEdgeTerms(edge);
+  tooltip();
+  if (changed) {
+    footer();
+    scheduleDraw();
+  }
+}
+
+function tipLine(cls, text) {
+  const d = document.createElement("div");
+  d.className = cls;
+  d.textContent = text;
+  return d;
+}
+// The cursor tooltip: symbol identity (+ its edge's shared terms when the
+// cursor rides an edge or a neighbor endpoint) or a drill hint for island
+// labels. Facts only; pointer-events: none so it never blocks a click.
+function tooltip() {
+  const tip = $("tip");
+  if (!mouse) { tip.hidden = true; return; }
+  tip.textContent = "";
+  if (hovered >= 0) {
+    const s = S[hovered];
+    tip.appendChild(tipLine("t-name", s.qname));
+    tip.appendChild(tipLine("t-loc", `${s.file}:${s.line}`));
+    tip.appendChild(tipLine("t-loc", `dir ${dirOf(s)}`));
+    if (edgeHover) {
+      tip.appendChild(tipLine("t-terms", `shared with ${S[edgeHover.a].qname} — ${edgeTermText(edgeHover)}`));
+    }
+    tip.appendChild(tipLine("t-hint", `double-click opens ${s.file}`));
+  } else if (edgeHover) {
+    tip.appendChild(tipLine("t-name", `${S[edgeHover.a].qname} — ${S[edgeHover.b].qname}`));
+    tip.appendChild(tipLine("t-terms", `shared: ${edgeTermText(edgeHover)}`));
+  } else if (hoverLabel) {
+    tip.appendChild(tipLine("t-name", hoverLabel.path));
+    tip.appendChild(tipLine("t-hint", `double-click to open ${hoverLabel.path}`));
+  } else {
+    tip.hidden = true;
+    return;
+  }
+  tip.hidden = false;
+  const st = $("stage");
+  let x = mouse.x + 14, y = mouse.y + 14;
+  if (x + tip.offsetWidth > st.clientWidth - 4) x = Math.max(4, mouse.x - tip.offsetWidth - 10);
+  if (y + tip.offsetHeight > st.clientHeight - 4) y = Math.max(4, mouse.y - tip.offsetHeight - 10);
+  tip.style.left = x + "px";
+  tip.style.top = y + "px";
+}
+
 /* ── selection: the anchor ── */
 async function select(id, center, fromBack) {
+  // compare pick mode (TKI-66): a click chooses the B side, nothing else
+  if (picking >= 0) {
+    const a = picking;
+    picking = -1;
+    openCompare(a, id);
+    footer();
+    return;
+  }
   // selecting outside the drill (search hit, card reference) exits to the
   // whole-repo map — the breadcrumb resets, so "where am I" stays obvious
   if (drill && !drill.set.has(id)) await drillTo("");
@@ -943,7 +1113,7 @@ function qnameSpan(qname) {
   span.appendChild(document.createTextNode(base));
   return span;
 }
-function refLine(ref, extra) {
+function refLine(ref, extra, cmpA) {
   const li = document.createElement("li");
   li.dataset.id = ref.id;
   li.title = `${ref.qname} — ${ref.file}:${ref.line}`;
@@ -967,6 +1137,20 @@ function refLine(ref, extra) {
     c.className = "cos";
     c.textContent = extra.toFixed(2);
     li.appendChild(c);
+  }
+  // per-row compare (TKI-66): side-by-side against THIS row, not the
+  // default embedding neighbor
+  if (cmpA !== undefined && cmpA !== ref.id) {
+    li.classList.add("has-cmp");
+    const go = document.createElement("span");
+    go.className = "cmpgo";
+    go.textContent = "⇆";
+    go.title = `compare side-by-side with ${ref.qname}`;
+    go.addEventListener("click", e => {
+      e.stopPropagation();
+      openCompare(cmpA, ref.id);
+    });
+    li.appendChild(go);
   }
   li.addEventListener("click", () => select(ref.id, true));
   return li;
@@ -1040,7 +1224,7 @@ async function loadCard(id) {
     sp.className = "pathseg";
     sp.textContent = seg;
     const target = segs.slice(0, i + 1).join("/");
-    sp.title = `drill: ${target}`;
+    sp.title = `open ${target}`;
     sp.addEventListener("click", () => drillTo(target));
     loc.appendChild(sp);
   });
@@ -1113,7 +1297,7 @@ async function loadCard(id) {
         return;
       }
       const ul = document.createElement("ul");
-      c.nearest_existing.forEach(x => ul.appendChild(refLine(x, [x.a_cos, x.b_cos])));
+      c.nearest_existing.forEach(x => ul.appendChild(refLine(x, [x.a_cos, x.b_cos], id)));
       sec.appendChild(ul);
     }));
   }
@@ -1126,7 +1310,7 @@ async function loadCard(id) {
         sub.textContent = "exact (identical structure)";
         sec.appendChild(sub);
         const ul = document.createElement("ul");
-        c.clones.exact.forEach(x => ul.appendChild(refLine(x)));
+        c.clones.exact.forEach(x => ul.appendChild(refLine(x, undefined, id)));
         sec.appendChild(ul);
       }
       if (c.clones.near.length) {
@@ -1135,7 +1319,7 @@ async function loadCard(id) {
         sub.textContent = "near (cos A)";
         sec.appendChild(sub);
         const ul = document.createElement("ul");
-        c.clones.near.forEach(x => ul.appendChild(refLine(x, x.cos)));
+        c.clones.near.forEach(x => ul.appendChild(refLine(x, x.cos, id)));
         sec.appendChild(ul);
       }
     }));
@@ -1152,7 +1336,7 @@ async function loadCard(id) {
       return;
     }
     const ul = document.createElement("ul");
-    c.twins.members.forEach(x => ul.appendChild(refLine(x)));
+    c.twins.members.forEach(x => ul.appendChild(refLine(x, undefined, id)));
     sec.appendChild(ul);
     const sh = document.createElement("div");
     sh.className = "shared";
@@ -1169,7 +1353,7 @@ async function loadCard(id) {
       sub.textContent = "callers";
       sec.appendChild(sub);
       const ul = document.createElement("ul");
-      c.callers.forEach(x => ul.appendChild(refLine(x)));
+      c.callers.forEach(x => ul.appendChild(refLine(x, undefined, id)));
       sec.appendChild(ul);
     }
     if (c.callees.length) {
@@ -1178,7 +1362,7 @@ async function loadCard(id) {
       sub.textContent = "callees";
       sec.appendChild(sub);
       const ul = document.createElement("ul");
-      c.callees.forEach(x => ul.appendChild(refLine(x)));
+      c.callees.forEach(x => ul.appendChild(refLine(x, undefined, id)));
       sec.appendChild(ul);
     }
   }));
@@ -1204,7 +1388,7 @@ async function loadCard(id) {
     card.appendChild(listSection("next", "nearest unvisited layout neighbor", sec => {
       const ul = document.createElement("ul");
       const s = S[next[1]];
-      ul.appendChild(refLine({id: s.id, qname: s.qname, file: s.file, line: s.line}));
+      ul.appendChild(refLine({id: s.id, qname: s.qname, file: s.file, line: s.line}, undefined, id));
       sec.appendChild(ul);
     }));
   }
@@ -1275,10 +1459,10 @@ function syncScroll(from, to) {
   requestAnimationFrame(() => { syncing = false; });
 }
 
-async function openCompare(id) {
+async function openCompare(id, bid) {
   let j;
   try {
-    const r = await fetch(`/api/compare?id=${id}`);
+    const r = await fetch(`/api/compare?id=${id}` + (bid !== undefined ? `&b=${bid}` : ""));
     if (!r.ok) throw new Error((await r.json()).error || `HTTP ${r.status}`);
     j = await r.json();
   } catch (e) {
@@ -1321,10 +1505,24 @@ async function openCompare(id) {
   $("cmp").hidden = false;
 }
 function closeCompare() {
+  picking = -1;
   if (!cmp) return;
   cmp = null;
   $("cmp").hidden = true;
   $("cmppanes").textContent = "";
+}
+
+/* ── compare pick mode (TKI-66): swap the B side from the map/search ── */
+function startPick() {
+  if (!cmp) return;
+  picking = cmp.a.id;
+  $("cmp").hidden = true; // the map is the picker; cmp state stays loaded
+  footer();
+}
+function cancelPick() {
+  picking = -1;
+  if (cmp) $("cmp").hidden = false; // back to the overlay as it was
+  footer();
 }
 
 /* ── search ── */
@@ -1423,7 +1621,7 @@ function buildChips() {
     });
     const target = drillTarget(dir);
     if (target) {
-      chip.title = `dblclick: drill into ${target}`;
+      chip.title = `double-click to open ${target}`;
       chip.addEventListener("dblclick", () => drillTo(target));
     }
     chips.appendChild(chip);
@@ -1549,7 +1747,7 @@ function renderGuide() {
       .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
       .slice(0, 5)
       .map(([dir, cnt]) => row(nameEl(dir), String(cnt),
-        `drill: ${drillTarget(dir)}`, () => drillTo(drillTarget(dir))));
+        `click to open ${drillTarget(dir)}`, () => drillTo(drillTarget(dir))));
     section("largest dirs", "symbols · click to drill", dirs);
 
     const fcounts = new Map();
@@ -1559,7 +1757,7 @@ function renderGuide() {
         .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
         .slice(0, 3)
         .map(([file, cnt]) => row(nameEl(midPath(file, 30)), String(cnt),
-          `drill: ${file}`, () => drillTo(file)));
+          `click to open ${file}`, () => drillTo(file)));
       section("largest files", "symbols · click to drill", files);
     }
   }
@@ -1655,25 +1853,32 @@ function initControls() {
       if (id >= 0) select(id, false);
     }
   });
+  // hover hit-tests (point, edge, island label) run at most once per
+  // animation frame — mousemove only records the cursor (TKI-66)
+  let hoverRaf = 0;
   canvas.addEventListener("mousemove", e => {
     if (dragging) {
       const dx = e.offsetX - lastX, dy = e.offsetY - lastY;
       moved += Math.abs(dx) + Math.abs(dy);
       view.tx += dx; view.ty += dy;
       lastX = e.offsetX; lastY = e.offsetY;
+      $("tip").hidden = true;
       scheduleDraw();
       return;
     }
-    const h = nearest(e.offsetX, e.offsetY);
-    if (h !== hovered) {
-      hovered = h;
-      canvas.style.cursor = h >= 0 ? "pointer" : "default";
+    mouse = {x: e.offsetX, y: e.offsetY};
+    if (!hoverRaf) hoverRaf = requestAnimationFrame(() => { hoverRaf = 0; hoverUpdate(); });
+  });
+  canvas.addEventListener("mouseleave", () => {
+    mouse = null;
+    $("tip").hidden = true;
+    if (hovered !== -1 || edgeHover || hoverLabel) {
+      hovered = -1;
+      edgeHover = null;
+      hoverLabel = null;
       footer();
       scheduleDraw();
     }
-  });
-  canvas.addEventListener("mouseleave", () => {
-    if (hovered !== -1) { hovered = -1; footer(); scheduleDraw(); }
   });
   // drill gestures: dblclick a dir label = drill into that dir; dblclick a
   // point = drill into its file; Escape = up one level (hitlist first)
@@ -1689,11 +1894,13 @@ function initControls() {
   document.addEventListener("keydown", e => {
     if (e.key !== "Escape" || e.target === $("search")) return;
     if (!$("hitlist").hidden) { $("hitlist").hidden = true; return; }
+    if (picking >= 0) { cancelPick(); return; }
     if (cmp) { closeCompare(); return; }
     if (navStack.length) { popBack(); return; }
     drillUp();
   });
   $("cmpclose").addEventListener("click", closeCompare);
+  $("cmppick").addEventListener("click", startPick);
   canvas.addEventListener("wheel", e => {
     e.preventDefault();
     const f = Math.exp(-e.deltaY * 0.0015);
