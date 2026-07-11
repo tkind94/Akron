@@ -299,16 +299,25 @@ pub fn relax(pos: &mut [(f32, f32)], radii: &[f32]) {
     }
     let cell = 2.0 * rmax; // any overlapping pair is within one cell ring
     let key = |x: f64, y: f64| ((x / cell).floor() as i64, (y / cell).floor() as i64);
+    // Grid + candidate buffers live across sweeps (TKI-59): rebuilding the
+    // HashMap (and every cell's Vec) each sweep was pure allocation churn.
+    // Cells emptied by movement keep an empty Vec — `get` on them adds no
+    // candidates, so the candidate SET per point is unchanged, and the
+    // sort below already makes cell order irrelevant. Bit-exact.
+    let mut grid: std::collections::HashMap<(i64, i64), Vec<u32>> =
+        std::collections::HashMap::new();
+    let mut cands: Vec<u32> = Vec::new();
     for _ in 0..RELAX_SWEEPS {
-        let mut grid: std::collections::HashMap<(i64, i64), Vec<u32>> =
-            std::collections::HashMap::new();
+        for v in grid.values_mut() {
+            v.clear();
+        }
         for (i, &(x, y)) in p.iter().enumerate() {
             grid.entry(key(x, y)).or_default().push(i as u32);
         }
         let mut moved = false;
         for i in 0..n {
             let (gx, gy) = key(p[i].0, p[i].1);
-            let mut cands: Vec<u32> = Vec::new();
+            cands.clear();
             for dx in -1..=1i64 {
                 for dy in -1..=1i64 {
                     if let Some(v) = grid.get(&(gx + dx, gy + dy)) {
@@ -317,7 +326,7 @@ pub fn relax(pos: &mut [(f32, f32)], radii: &[f32]) {
                 }
             }
             cands.sort_unstable(); // grid cell order must not matter
-            for j in cands {
+            for &j in &cands {
                 let j = j as usize;
                 let (dx, dy) = (p[j].0 - p[i].0, p[j].1 - p[i].1);
                 let d2 = dx * dx + dy * dy;
