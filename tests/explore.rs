@@ -964,6 +964,26 @@ fn compare_defaults_to_the_embedding_ranked_neighbor() {
 }
 
 #[test]
+fn compare_unrelated_pair_serves_the_honest_empty_state() {
+    // TKI-66: the b= override on a structurally unrelated pair must return
+    // the full payload with ZERO regions — an honest empty state, never
+    // boilerplate token-mass matches (the reproduced compare defect).
+    let (_dir, state) = viewer_tree_state();
+    let a = sym_id(&state, "greet"); // string formatting, no loops
+    let b = sym_id(&state, "load_rows"); // file IO loop
+    let resp = explore::respond(&state, &format!("/api/compare?id={a}&b={b}"));
+    assert_eq!(resp.status, 200);
+    let v = json(&resp);
+    assert_eq!(v["a"]["id"], a);
+    assert_eq!(v["b"]["id"], b);
+    assert_eq!(
+        v["regions"].as_array().unwrap().len(),
+        0,
+        "unrelated pair: no regions, not noise"
+    );
+}
+
+#[test]
 fn compare_rejects_bad_ids() {
     let state = fixture_state();
     assert_eq!(explore::respond(&state, "/api/compare").status, 400);

@@ -258,7 +258,7 @@ pre.code {
 .lnk:hover { color: var(--accent); text-decoration-color: var(--accent); }
 
 /* ── compare: side-by-side over the main area (esc closes) ── */
-#cmp { position: absolute; inset: 0; z-index: 20; background: var(--panel); display: grid; grid-template-rows: auto 1fr; }
+#cmp { position: absolute; inset: 0; z-index: 20; background: var(--panel); display: grid; grid-template-rows: auto auto 1fr; }
 #cmp[hidden] { display: none; }
 #cmpbar {
   display: flex;
@@ -270,6 +270,11 @@ pre.code {
   overflow: hidden;
 }
 #cmpbar .legend { color: var(--dim); margin-left: auto; }
+#cmpempty {
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--dim);
+}
 #cmppanes { display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
 .cmppane { position: relative; overflow: auto; padding: 8px 10px; }
 .cmppane:first-child { border-right: 1px solid var(--line); }
@@ -325,6 +330,7 @@ footer {
       <span id="cmptitle"></span>
       <span class="legend">solid — identical after whitespace collapse · dotted — aligned, differs · hover pairs</span>
     </div>
+    <div id="cmpempty" hidden>no structurally shared regions with this symbol</div>
     <div id="cmppanes"></div>
   </div>
 </main>
@@ -1283,6 +1289,10 @@ async function openCompare(id) {
   if (id !== selected) return; // stale response
   cmp = j;
   $("cmptitle").textContent = `${j.a.qname} ⟷ ${j.b.qname}`;
+  // honest empty state (TKI-66): the alignment found no structural
+  // agreement — say so; the tier legend would describe nothing
+  $("cmpempty").hidden = j.regions.length > 0;
+  document.querySelector("#cmpbar .legend").hidden = j.regions.length === 0;
   const panes = $("cmppanes");
   panes.textContent = "";
   const pa = buildPane(j.a, j.regions, "a");

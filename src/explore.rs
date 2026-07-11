@@ -1179,9 +1179,13 @@ fn compare_json(state: &ExploreState, id: usize, query: &str) -> Result<Value, R
             .ok_or_else(|| error(404, "no comparison candidate"))?,
     };
     let (sa, sb) = (&state.sources[id], &state.sources[bid]);
+    // Channel-A cosine feeds align's pair-level honesty gate (TKI-66): a
+    // structurally unrelated pair renders the empty state, never token noise.
+    let wl_cos = fingerprint::cosine(&symbols[id].wl, &symbols[bid].wl);
     let regions = align::align(
         &sa.norm, &sa.text, symbols[id].span.0 as u32,
         &sb.norm, &sb.text, symbols[bid].span.0 as u32,
+        wl_cos,
     );
     let (ma, mb) = (utf16_map(&sa.text), utf16_map(&sb.text));
     Ok(json!({

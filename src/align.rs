@@ -27,6 +27,27 @@
 //!    Needleman-Wunsch pass (gap score 0, so it never penalizes leaving a
 //!    statement unmatched — only rewards matching one).
 //!
+//! Honesty gates (TKI-66): statement-level matching used to pair lines on
+//! token mass alone, which let boilerplate (`self`, a generic return-value
+//! name, call syntax) glue statements of unrelated functions together. Two
+//! gates fix that:
+//! - A statement pair is only accepted when the two raw texts share at
+//!   least one DISTINCTIVE identifier — not a Python keyword, not in
+//!   `STOPLIST_IDENTS`, not single-character (see the const's doc).
+//!   Sharing only boilerplate can never create a match, even for
+//!   hash-equal or byte-identical statements (`return result` alone is
+//!   not evidence of shared structure). Non-hash-equal pairs must
+//!   additionally share MORE than `DIST_JACCARD` of their combined
+//!   distinctive vocabulary — normalization collapses attribute chains and
+//!   calls to near-identical label sequences, so token-LCS similarity alone
+//!   still pairs e.g. `self.stats.inc_value(...)` with
+//!   `assert self.crawler.stats` (sim 0.75, one shared name out of five).
+//! - Pair level: when the whole alignment produced ZERO structural anchors
+//!   (hash-equal subtrees of `MIN_ANCHOR_NODES`+ nodes) AND the two
+//!   functions' WL cosine is below `WL_FLOOR`, `align` returns no regions
+//!   at all — the honest empty state. Statement-level near-misses are only
+//!   trustworthy in the neighborhood of real structural agreement.
+//!
 //! Tier rule: the tier is decided by the raw TEXT, not the hash. A
 //! hash-equal pair *looks* identical structurally, but normalization
 //! abstracts literals and alpha-renames locals, so the raw source can
@@ -54,8 +75,54 @@ use xxhash_rust::xxh3::xxh3_64;
 const MIN_ANCHOR_NODES: u32 = 8;
 
 /// Minimum token-LCS similarity for two statements to be reported as a
-/// tier-2 region (unless they're already hash-equal).
-const SIM_THRESHOLD: f32 = 0.5;
+/// tier-2 region (unless they're already hash-equal). Raised from 0.5 in
+/// TKI-66: at 0.5, half the token mass may disagree, and on normalized
+/// labels (locals alpha-renamed, calls collapsed to `EXT`) call-syntax
+/// boilerplate alone reaches that — the reproduced defect paired
+/// `response = self.adapt_response(response)` with
+/// `ret = iterate_spider_output(self.parse_row(response, row))` at
+/// sim ≈ 0.55. 0.66 (two thirds of the tokens agree) clears every such
+/// spurious pair in the scrapy-full sweep while the genuine sibling
+/// alignments (HTTP11/H2 `__init__`s, `follow_all` kwargs blocks,
+/// GZip/Deflate decoders) keep their regions — tuning table in TKI-66.
+const SIM_THRESHOLD: f32 = 0.66;
+
+/// Pair-level honesty floor: with zero structural anchors, statement-level
+/// regions are only reported when the two functions' WL cosine (Channel A,
+/// the caller passes it in) is at least this. 0.5 sits just under
+/// θ_clone = 0.60: anything the clone channel would even consider "near"
+/// stays alignable, while structurally unrelated pairs (the b= override,
+/// the embedding neighbor of a symbol with no real sibling) get the honest
+/// empty state instead of token-mass noise.
+const WL_FLOOR: f32 = 0.5;
+
+/// Distinctive-vocabulary Jaccard floor for NON-hash-equal statement pairs:
+/// `shared / union` must exceed 1/4 (checked in integer math, `4·shared >
+/// union`). Tuned on the scrapy-full sweep: the spurious cross-purpose
+/// pairs share exactly one name out of 4–5 (≤ 0.25), while every genuine
+/// sibling line observed sits at 2/7 (HTTP11/H2 pool init) or above.
+/// Hash-equal pairs are exempt — identical structure is already strong
+/// evidence; they only need one shared distinctive name.
+const DIST_JACCARD: (usize, usize) = (1, 4);
+
+/// Identifiers too ubiquitous to count as evidence that two statements are
+/// about the same thing: receivers/variadics and generic value names. The
+/// list is deliberately short and corpus-agnostic — domain nouns (e.g.
+/// `response` in an HTTP library) stay distinctive; single-character names
+/// are handled by a length rule in `is_distinctive`, not listed here.
+const STOPLIST_IDENTS: &[&str] = &[
+    "self", "cls", "args", "kwargs", // receivers and variadics
+    "result", "ret", "res", "retval", "value", "val", "data", "out", "obj", "tmp",
+    "item", // generic value names
+];
+
+/// Python keywords (incl. `True`/`False`/`None`) — structure, not vocabulary.
+const PY_KEYWORDS: &[&str] = &[
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class",
+    "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global",
+    "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return",
+    "try", "while", "with", "yield",
+];
 
 /// Below this many leaf tokens a statement is too short for its similarity
 /// score to be meaningful (e.g. two single-token `pass` statements would
@@ -96,7 +163,14 @@ pub struct Region {
 /// byte offsets); `a_src`/`b_src` are each symbol's own source slice;
 /// `a_base`/`b_base` are the file byte offsets where each slice starts
 /// (so a node with span (s,e) maps to a_src[(s-a_base)..(e-a_base)]).
-pub fn align(a: &NormTree, a_src: &str, a_base: u32, b: &NormTree, b_src: &str, b_base: u32) -> Vec<Region> {
+/// `wl_cos` is the pair's Channel-A (WL histogram) cosine — the caller
+/// already has both histograms; it feeds only the pair-level honesty gate
+/// (§ module doc) and never changes which statements match.
+pub fn align(
+    a: &NormTree, a_src: &str, a_base: u32,
+    b: &NormTree, b_src: &str, b_base: u32,
+    wl_cos: f32,
+) -> Vec<Region> {
     if a.labels.is_empty() || b.labels.is_empty() {
         return Vec::new();
     }
@@ -114,10 +188,14 @@ pub fn align(a: &NormTree, a_src: &str, a_base: u32, b: &NormTree, b_src: &str, 
         b_base,
         stmt_labels: STATEMENT_KINDS.iter().map(|k| xxh3_64(k.as_bytes())).collect(),
         regions: Vec::new(),
+        anchored: false,
     };
     let root_a = (a.labels.len() - 1) as u32;
     let root_b = (b.labels.len() - 1) as u32;
     ctx.align_pair(root_a, root_b);
+    if !ctx.anchored && wl_cos < WL_FLOOR {
+        return Vec::new(); // the honest empty state (§ module doc)
+    }
     ctx.regions.sort_by_key(|r| r.a.0);
     debug_assert!(non_overlapping(&ctx.regions), "align produced overlapping regions");
     ctx.regions
@@ -161,6 +239,11 @@ struct Ctx<'a> {
     b_base: u32,
     stmt_labels: Vec<u64>,
     regions: Vec<Region>,
+    /// Whether any hash-equal pair of `MIN_ANCHOR_NODES`+ nodes was emitted
+    /// (a recursion-rule-1 subtree, a matched child, or a Merkle-equal
+    /// statement) — the structural evidence the pair-level honesty gate
+    /// keys on.
+    anchored: bool,
 }
 
 impl<'a> Ctx<'a> {
@@ -169,6 +252,9 @@ impl<'a> Ctx<'a> {
     /// the gaps between matches are handled recursively or statement-wise.
     fn align_pair(&mut self, na: u32, nb: u32) {
         if self.hash_a[na as usize] == self.hash_b[nb as usize] {
+            if self.size_a[na as usize] >= MIN_ANCHOR_NODES {
+                self.anchored = true;
+            }
             self.emit(na, nb);
             return;
         }
@@ -179,6 +265,7 @@ impl<'a> Ctx<'a> {
         let (mut cursor_a, mut cursor_b) = (0usize, 0usize);
         for (ia, ib) in pairs {
             self.align_gap(&children_a[cursor_a..ia], &children_b[cursor_b..ib]);
+            self.anchored = true; // match_children pairs are MIN_ANCHOR_NODES+ by construction
             self.emit(children_a[ia], children_b[ib]);
             cursor_a = ia + 1;
             cursor_b = ib + 1;
@@ -204,9 +291,122 @@ impl<'a> Ctx<'a> {
         if stmts_a.is_empty() || stmts_b.is_empty() {
             return;
         }
-        for (i, j) in align_statements(&stmts_a, &stmts_b, self.a, self.b, &self.hash_a, &self.hash_b) {
-            self.emit(stmts_a[i], stmts_b[j]);
+        for (i, j) in self.align_statements(&stmts_a, &stmts_b) {
+            let (na, nb) = (stmts_a[i], stmts_b[j]);
+            // A Merkle-equal statement of anchor size is structural evidence
+            // too — the statement DP is where block-level children land when
+            // the enclosing blocks differ, so anchors must be creditable here.
+            if self.hash_a[na as usize] == self.hash_b[nb as usize]
+                && self.size_a[na as usize] >= MIN_ANCHOR_NODES
+            {
+                self.anchored = true;
+            }
+            self.emit(na, nb);
         }
+    }
+
+    /// A statement's distinctive identifiers: the raw text of its identifier
+    /// leaves, minus Python keywords, `STOPLIST_IDENTS`, and single-character
+    /// names. Leaf spans are absolute file offsets; slices come off this
+    /// side's own source. Sorted+deduped so the sharing check is a merge.
+    fn distinctive_idents(&self, n: u32, side_a: bool) -> Vec<&'a str> {
+        let (tree, src, base) = if side_a {
+            (self.a, self.a_src, self.a_base)
+        } else {
+            (self.b, self.b_src, self.b_base)
+        };
+        let mut out: Vec<&str> = Vec::new();
+        let mut stack = vec![n];
+        while let Some(k) = stack.pop() {
+            let kids = &tree.children[k as usize];
+            if !kids.is_empty() {
+                stack.extend_from_slice(kids);
+                continue;
+            }
+            let (s, e) = tree.spans[k as usize];
+            let Some(text) = src.get(s.saturating_sub(base) as usize..e.saturating_sub(base) as usize)
+            else {
+                continue;
+            };
+            if is_distinctive(text) {
+                out.push(text);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Needleman-Wunsch alignment of two statement sequences (gap score 0,
+    /// so a statement is never penalized for staying unmatched — only
+    /// rewarded for matching). Returns the accepted pairs — an optimal
+    /// diagonal step is only reported as a match when it clears the
+    /// acceptance bar — as indices into `stmts_a`/`stmts_b`.
+    ///
+    /// Acceptance (TKI-66, § module doc): every statement pair — hash-equal
+    /// or not — must share at least one distinctive identifier; sharing only
+    /// keywords/boilerplate never creates a match. Non-hash-equal pairs
+    /// additionally need `sim >= SIM_THRESHOLD`, both sides at least
+    /// `MIN_STMT_TOKENS` tokens long, and distinctive-vocabulary Jaccard
+    /// above `DIST_JACCARD`.
+    ///
+    /// Tie-break: identical to `match_children` — the diagonal wins ties
+    /// against either skip direction (more information for the same score),
+    /// and advancing A wins ties between the two skip directions.
+    fn align_statements(&self, stmts_a: &[u32], stmts_b: &[u32]) -> Vec<(usize, usize)> {
+        let (m, n) = (stmts_a.len(), stmts_b.len());
+        let tokens_a: Vec<Vec<u64>> = stmts_a.iter().map(|&s| leaf_labels(s, self.a)).collect();
+        let tokens_b: Vec<Vec<u64>> = stmts_b.iter().map(|&s| leaf_labels(s, self.b)).collect();
+        let dist_a: Vec<Vec<&str>> = stmts_a.iter().map(|&s| self.distinctive_idents(s, true)).collect();
+        let dist_b: Vec<Vec<&str>> = stmts_b.iter().map(|&s| self.distinctive_idents(s, false)).collect();
+
+        let hash_eq = |i: usize, j: usize| {
+            self.hash_a[stmts_a[i] as usize] == self.hash_b[stmts_b[j] as usize]
+        };
+        let sim = |i: usize, j: usize| {
+            if hash_eq(i, j) { 1.0 } else { token_sim(&tokens_a[i], &tokens_b[j]) }
+        };
+        let accept = |i: usize, j: usize, s: f32| {
+            let (shared, union) = dist_overlap(&dist_a[i], &dist_b[j]);
+            if shared == 0 {
+                return false;
+            }
+            if hash_eq(i, j) {
+                return true;
+            }
+            s >= SIM_THRESHOLD
+                && tokens_a[i].len() >= MIN_STMT_TOKENS
+                && tokens_b[j].len() >= MIN_STMT_TOKENS
+                && shared * DIST_JACCARD.1 > union * DIST_JACCARD.0
+        };
+
+        let mut dp = vec![vec![0f32; n + 1]; m + 1];
+        for i in 1..=m {
+            for j in 1..=n {
+                let diag = dp[i - 1][j - 1] + sim(i - 1, j - 1);
+                dp[i][j] = diag.max(dp[i - 1][j]).max(dp[i][j - 1]);
+            }
+        }
+        let mut pairs = Vec::new();
+        let (mut i, mut j) = (m, n);
+        while i > 0 && j > 0 {
+            let s = sim(i - 1, j - 1);
+            if dp[i][j] == dp[i - 1][j - 1] + s {
+                if accept(i - 1, j - 1, s) {
+                    pairs.push((i - 1, j - 1));
+                }
+                i -= 1;
+                j -= 1;
+                continue;
+            }
+            if dp[i][j] == dp[i - 1][j] {
+                i -= 1;
+            } else {
+                j -= 1;
+            }
+        }
+        pairs.reverse();
+        pairs
     }
 
     /// Emit a region for a matched node pair, applying the raw-text tier
@@ -353,54 +553,35 @@ fn token_sim(a: &[u64], b: &[u64]) -> f32 {
     2.0 * lcs_length(a, b) as f32 / (a.len() + b.len()) as f32
 }
 
-/// Needleman-Wunsch alignment of two statement sequences (gap score 0, so a
-/// statement is never penalized for staying unmatched — only rewarded for
-/// matching). Returns the accepted pairs — an optimal diagonal step is only
-/// reported as a match when it clears the acceptance bar (hash-equal, or
-/// `sim >= SIM_THRESHOLD` with both sides having `>= MIN_STMT_TOKENS`
-/// tokens) — as indices into `stmts_a`/`stmts_b`.
-///
-/// Tie-break: identical to `match_children` — the diagonal wins ties
-/// against either skip direction (more information for the same score),
-/// and advancing A wins ties between the two skip directions.
-fn align_statements(stmts_a: &[u32], stmts_b: &[u32], tree_a: &NormTree, tree_b: &NormTree, hash_a: &[u64], hash_b: &[u64]) -> Vec<(usize, usize)> {
-    let (m, n) = (stmts_a.len(), stmts_b.len());
-    let tokens_a: Vec<Vec<u64>> = stmts_a.iter().map(|&s| leaf_labels(s, tree_a)).collect();
-    let tokens_b: Vec<Vec<u64>> = stmts_b.iter().map(|&s| leaf_labels(s, tree_b)).collect();
-
-    let hash_eq = |i: usize, j: usize| hash_a[stmts_a[i] as usize] == hash_b[stmts_b[j] as usize];
-    let sim = |i: usize, j: usize| if hash_eq(i, j) { 1.0 } else { token_sim(&tokens_a[i], &tokens_b[j]) };
-    let accept = |i: usize, j: usize, s: f32| {
-        hash_eq(i, j) || (s >= SIM_THRESHOLD && tokens_a[i].len() >= MIN_STMT_TOKENS && tokens_b[j].len() >= MIN_STMT_TOKENS)
-    };
-
-    let mut dp = vec![vec![0f32; n + 1]; m + 1];
-    for i in 1..=m {
-        for j in 1..=n {
-            let diag = dp[i - 1][j - 1] + sim(i - 1, j - 1);
-            dp[i][j] = diag.max(dp[i - 1][j]).max(dp[i][j - 1]);
-        }
+/// Identifier-shaped raw text that carries vocabulary evidence: at least
+/// two characters (single letters are loop/temp names), `[A-Za-z_]` head
+/// with `[A-Za-z0-9_]` tail (so strings, numbers, and operators never
+/// qualify), and neither a Python keyword nor a `STOPLIST_IDENTS` name.
+fn is_distinctive(text: &str) -> bool {
+    let mut chars = text.chars();
+    let head_ok = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    if !head_ok || text.len() < 2 || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return false;
     }
-    let mut pairs = Vec::new();
-    let (mut i, mut j) = (m, n);
-    while i > 0 && j > 0 {
-        let s = sim(i - 1, j - 1);
-        if dp[i][j] == dp[i - 1][j - 1] + s {
-            if accept(i - 1, j - 1, s) {
-                pairs.push((i - 1, j - 1));
+    !PY_KEYWORDS.contains(&text) && !STOPLIST_IDENTS.contains(&text)
+}
+
+/// `(shared, union)` sizes of two sorted+deduped identifier lists — the
+/// distinctive-vocabulary overlap `accept` gates on (a merge, no allocation).
+fn dist_overlap(a: &[&str], b: &[&str]) -> (usize, usize) {
+    let (mut i, mut j, mut shared) = (0, 0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                shared += 1;
+                i += 1;
+                j += 1;
             }
-            i -= 1;
-            j -= 1;
-            continue;
-        }
-        if dp[i][j] == dp[i - 1][j] {
-            i -= 1;
-        } else {
-            j -= 1;
         }
     }
-    pairs.reverse();
-    pairs
+    (shared, a.len() + b.len() - shared)
 }
 
 /// Collapse every run of ASCII whitespace to a single space and trim — the
@@ -444,7 +625,13 @@ mod tests {
     fn align_srcs<'x>(a: &'x str, b: &'x str) -> Vec<Region> {
         let (ta, sa, ea) = build(a);
         let (tb, sb, eb) = build(b);
-        align(&ta, &a[sa as usize..ea as usize], sa, &tb, &b[sb as usize..eb as usize], sb)
+        // The same Channel-A cosine the production caller (explore.rs)
+        // passes: WL histograms at the shipping wl_iters = 3.
+        let wl_cos = fingerprint::cosine(
+            &fingerprint::wl_histogram(&ta, 3),
+            &fingerprint::wl_histogram(&tb, 3),
+        );
+        align(&ta, &a[sa as usize..ea as usize], sa, &tb, &b[sb as usize..eb as usize], sb, wl_cos)
     }
 
     /// The symbol's own byte width (its `function_definition` node span may
@@ -530,8 +717,15 @@ mod tests {
         // via the statement DP — but its raw text is byte-identical, and the
         // tier rule answers from the text (found on httpx's Decoder pair:
         // GZip vs Deflate `decode` share this exact raise).
-        let a = "def f(x):\n    try:\n        return g(x)\n    except Error as exc:\n        raise Wrapped(str(exc)) from exc\n";
-        let b = "def f(x):\n    y = x + 1\n    z = y * 2\n    try:\n        return g(z)\n    except Error as exc:\n        raise Wrapped(str(exc)) from exc\n";
+        //
+        // TKI-66 adjustment: the pair carries a shared `header = ...` anchor
+        // (hash-equal, MIN_ANCHOR_NODES+) so the pair-level honesty gate
+        // stays off — matching the real Decoder finding, where the raise
+        // sits inside structurally sibling functions. A lone shared line in
+        // an anchorless, WL-dissimilar pair is now the honest empty state
+        // (see unrelated_pair_with_one_shared_line_gets_the_honest_empty_state).
+        let a = "def f(x):\n    header = parse_header(x, 'strict')\n    try:\n        return g(x)\n    except Error as exc:\n        raise Wrapped(str(exc)) from exc\n";
+        let b = "def f(x):\n    header = parse_header(x, 'strict')\n    y = x + 1\n    z = y * 2\n    try:\n        return g(z)\n    except Error as exc:\n        raise Wrapped(str(exc)) from exc\n";
         let regions = align_srcs(a, b);
         let raise_region = regions
             .iter()
@@ -555,8 +749,59 @@ mod tests {
         let empty = NormTree { labels: vec![], children: vec![], spans: vec![] };
         let (t, s, e) = build("def f():\n    pass\n");
         let src = "def f():\n    pass\n";
-        assert!(align(&empty, "", 0, &t, &src[s as usize..e as usize], s).is_empty());
-        assert!(align(&t, &src[s as usize..e as usize], s, &empty, "", 0).is_empty());
+        assert!(align(&empty, "", 0, &t, &src[s as usize..e as usize], s, 0.0).is_empty());
+        assert!(align(&t, &src[s as usize..e as usize], s, &empty, "", 0, 0.0).is_empty());
+    }
+
+    // ── TKI-66 honesty gates ──
+
+    #[test]
+    fn boilerplate_only_statement_overlap_yields_no_regions() {
+        // The two `value = self.<call>(value)` lines are hash-equal after
+        // normalization (locals alpha-rename, calls collapse to EXT) and
+        // used to pair — but they share only stoplisted names (`self`,
+        // `value`); the call names differ. The distinctive-token gate must
+        // reject them, and nothing else here can match.
+        let a = "def fa(self, value):\n    value = self.adapt(value)\n    items = [v.strip() for v in value]\n    return items\n";
+        let b = "def fb(self, value):\n    while self.pending:\n        self.pending.pop()\n    value = self.transform(value)\n    return value\n";
+        let regions = align_srcs(a, b);
+        assert!(
+            regions.is_empty(),
+            "boilerplate-only sharing must not create regions: {:?}",
+            regions.iter().map(|r| (r.a, r.b, r.tier)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn unrelated_pair_with_one_shared_line_gets_the_honest_empty_state() {
+        // A byte-identical `validate_schema(payload)` line in two otherwise
+        // structurally unrelated functions: the statement WOULD pass the
+        // distinctive gate (shared `validate_schema`/`payload`), but with
+        // zero structural anchors and WL cosine far below the floor the
+        // pair-level gate returns no regions — one shared line in an
+        // unrelated body is not shared structure.
+        let a = "def read_config(path):\n    payload = json.loads(path.read_text())\n    validate_schema(payload)\n    return payload\n";
+        let b = "def sync_remote(client, bucket, payload):\n    for obj in client.list(bucket):\n        if obj.stale:\n            client.upload(obj)\n    validate_schema(payload)\n    while client.pending():\n        client.wait()\n";
+        let regions = align_srcs(a, b);
+        assert!(
+            regions.is_empty(),
+            "zero anchors + WL below floor must yield the empty state: {:?}",
+            regions.iter().map(|r| (r.a, r.b, r.tier)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn distinctive_ident_shapes() {
+        assert!(is_distinctive("adapt_response"));
+        assert!(is_distinctive("payload"));
+        assert!(is_distinctive("str")); // builtins are still vocabulary
+        assert!(!is_distinctive("self"));
+        assert!(!is_distinctive("result"));
+        assert!(!is_distinctive("return"));
+        assert!(!is_distinctive("x")); // single-character rule
+        assert!(!is_distinctive("','")); // string slice, not an identifier
+        assert!(!is_distinctive("42"));
+        assert!(!is_distinctive(""));
     }
 
     #[test]
