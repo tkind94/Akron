@@ -27,12 +27,15 @@
 //!    Needleman-Wunsch pass (gap score 0, so it never penalizes leaving a
 //!    statement unmatched — only rewards matching one).
 //!
-//! Tier rule: a hash-equal pair *looks* identical structurally, but
-//! normalization abstracts literals and alpha-renames locals, so the raw
-//! source can still differ (a renamed clone, a changed string literal).
-//! `emit` re-slices both sides' source, collapses whitespace, and demotes
-//! to tier 2 whenever the collapsed text differs — tier 1 means "identical
-//! code", not just "identical shape".
+//! Tier rule: the tier is decided by the raw TEXT, not the hash. A
+//! hash-equal pair *looks* identical structurally, but normalization
+//! abstracts literals and alpha-renames locals, so the raw source can
+//! still differ (a renamed clone, a changed string literal) — demoted to
+//! tier 2. Conversely, a DP-matched statement can be byte-identical while
+//! hashing differently (alpha indices depend on the surrounding binding
+//! order) — promoted to tier 1. `emit` re-slices both sides' source,
+//! collapses whitespace, and compares: tier 1 means "identical code",
+//! exactly and only.
 //!
 //! Determinism: every choice here is either a total order (sort by span) or
 //! an explicit tie-break (documented at each DP), so `align` is a pure
@@ -82,10 +85,9 @@ const STATEMENT_KINDS: &[&str] = &[
 pub struct Region {
     pub a: (u32, u32),
     pub b: (u32, u32),
-    /// 1 = exact (Merkle-equal normalized subtrees whose raw text is also
-    /// equal after whitespace collapsing); 2 = near-miss (Merkle-equal but
-    /// raw text differs — abstracted literals/renamed locals — or DP-aligned
-    /// statements).
+    /// 1 = exact: the two slices are identical after whitespace collapsing;
+    /// 2 = near-miss: structurally aligned but the raw text differs
+    /// (renamed locals, changed literals, edited statements).
     pub tier: u8,
 }
 
@@ -208,9 +210,15 @@ impl<'a> Ctx<'a> {
     }
 
     /// Emit a region for a matched node pair, applying the raw-text tier
-    /// rule (§ module doc) when the pair is hash-equal; a DP-matched
-    /// statement pair that isn't hash-equal is tier 2 by construction (it
-    /// only matched via token similarity, never claimed to be identical).
+    /// rule (§ module doc): tier is decided by the TEXT alone. Hash-equal
+    /// anchors usually pass (identical structure, identical bytes), but the
+    /// rule cuts both ways — a renamed/re-literaled anchor demotes to tier
+    /// 2, and a DP-matched statement whose raw text is byte-identical
+    /// promotes to tier 1 even though its Merkle hash differs (alpha-rename
+    /// indices depend on the surrounding function's binding order, so the
+    /// same `raise X(str(exc)) from exc` line hashes differently in two
+    /// different bodies — the reader's question is "is this the same
+    /// code?", and the text answers it).
     fn emit(&mut self, na: u32, nb: u32) {
         let (sa, ea) = self.a.spans[na as usize];
         let (sb, eb) = self.b.spans[nb as usize];
@@ -218,13 +226,9 @@ impl<'a> Ctx<'a> {
         debug_assert!(sb >= self.b_base && eb >= self.b_base, "span before symbol base");
         let a_span = (sa.saturating_sub(self.a_base), ea.saturating_sub(self.a_base));
         let b_span = (sb.saturating_sub(self.b_base), eb.saturating_sub(self.b_base));
-        let tier = if self.hash_a[na as usize] == self.hash_b[nb as usize] {
-            let ta = collapse_ws(&self.a_src[a_span.0 as usize..a_span.1 as usize]);
-            let tb = collapse_ws(&self.b_src[b_span.0 as usize..b_span.1 as usize]);
-            if ta == tb { 1 } else { 2 }
-        } else {
-            2
-        };
+        let ta = collapse_ws(&self.a_src[a_span.0 as usize..a_span.1 as usize]);
+        let tb = collapse_ws(&self.b_src[b_span.0 as usize..b_span.1 as usize]);
+        let tier = if ta == tb { 1 } else { 2 };
         self.regions.push(Region { a: a_span, b: b_span, tier });
     }
 }
@@ -517,6 +521,23 @@ mod tests {
         let b_src = &b[edit.b.0 as usize..edit.b.1 as usize];
         assert!(a_src.contains("split"), "a slice: {a_src:?}");
         assert!(b_src.contains("split"), "b slice: {b_src:?}");
+    }
+
+    #[test]
+    fn identical_statement_in_different_binding_context_promotes_to_tier1() {
+        // The same `raise` line hashes DIFFERENTLY in the two bodies (alpha
+        // indices shift with the surrounding bindings), so it can only pair
+        // via the statement DP — but its raw text is byte-identical, and the
+        // tier rule answers from the text (found on httpx's Decoder pair:
+        // GZip vs Deflate `decode` share this exact raise).
+        let a = "def f(x):\n    try:\n        return g(x)\n    except Error as exc:\n        raise Wrapped(str(exc)) from exc\n";
+        let b = "def f(x):\n    y = x + 1\n    z = y * 2\n    try:\n        return g(z)\n    except Error as exc:\n        raise Wrapped(str(exc)) from exc\n";
+        let regions = align_srcs(a, b);
+        let raise_region = regions
+            .iter()
+            .find(|r| a[r.a.0 as usize..r.a.1 as usize].contains("raise Wrapped"))
+            .expect("the shared raise statement pairs");
+        assert_eq!(raise_region.tier, 1, "byte-identical text is tier 1 regardless of hash");
     }
 
     #[test]
