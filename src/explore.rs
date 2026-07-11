@@ -42,6 +42,19 @@
 //! request — a pure function of the immutable state, so it is exactly as
 //! deterministic as the launch-time layout.
 //!
+//! Code viewer + navigation loop + compare (TKI-61): every symbol's full
+//! source is captured once at boot (`scan_sources` — the only filesystem
+//! read; requests never touch disk) with server-side highlight spans from
+//! the tree-sitter parse and identifier links resolved with the exact
+//! caller discipline `explain.rs` uses (same-file always, cross-file only
+//! when corpus-unique and non-ambient — an ambiguous name stays plain
+//! text). `/api/source?id=` serves one symbol's viewer payload;
+//! `/api/compare?id=[&b=]` serves a side-by-side pair — right-hand side
+//! defaults to the top embedding-ranked neighbor (the card's own ranking
+//! discipline; the semantic score is never shipped) — with `align::align`'s
+//! deterministic shared-region pairs. Offsets are UTF-16 code units so the
+//! page slices its JS strings directly.
+//!
 //! Convention prevalence (TKI-56): the start card's one factual line —
 //! `module docstring: 14 of 19 files`. `file_docs` classifies every scanned
 //! `.py` file once at boot (`has_module_docstring`, model-free, feature-free)
@@ -51,17 +64,20 @@
 //! "largest dirs"/"most callers" — client-side filtering over an immutable
 //! list, never a second server round trip.
 
+use crate::align;
 use crate::branch::BranchInfo;
 use crate::explain;
 use crate::fingerprint;
 use crate::history;
 use crate::layout;
+use crate::normalize;
 use crate::parse;
 use crate::pca;
 use crate::run::Analysis;
-use crate::types::Config;
+use crate::types::{Config, ModuleRef, NormTree, SymbolPrint};
 use anyhow::Result;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::Path;
 use tree_sitter::Node;
 
@@ -104,6 +120,10 @@ pub struct ExploreState {
     full_xy: Vec<(f32, f32)>,
     /// Global product-geometry coordinates (`None` for test symbols).
     prod_xy: Vec<Option<(f32, f32)>>,
+    /// Per-symbol viewer payload (TKI-61): source text, highlight/link
+    /// tokens (UTF-16 offsets), and the normalized tree the compare view
+    /// aligns with. Index-aligned with symbols.
+    sources: Vec<SymbolSource>,
     /// Pre-rendered `/api/symbols` body (the endpoint the determinism
     /// contract is stated over — built once, byte-stable).
     symbols_json: Vec<u8>,
@@ -270,15 +290,439 @@ fn is_plain_string(node: Node, source: &[u8]) -> bool {
     true
 }
 
+// ── the code viewer (TKI-61): boot-time source capture ──
+
+/// One symbol's viewer source as captured at boot: text plus byte-offset
+/// highlight spans and unresolved identifier sites (they resolve in
+/// `state_from`, where the whole symbol table exists). Passive data.
+pub struct RawSource {
+    text: String,
+    /// (start, end, class), byte offsets relative to `text`;
+    /// class ∈ kw/str/com/num/def/call.
+    syntax: Vec<(u32, u32, &'static str)>,
+    idents: Vec<IdentSite>,
+    /// The symbol's normalized tree (spans stay absolute file offsets) —
+    /// `align::align`'s input for the compare view.
+    norm: NormTree,
+}
+
+/// An identifier occurrence that may become a link: byte span (relative to
+/// the symbol's text) plus the same `(base, module)` join key a call at
+/// this site would record (`normalize.rs`) — so link resolution can apply
+/// exactly the caller-edge discipline.
+struct IdentSite {
+    start: u32,
+    end: u32,
+    base: String,
+    module: Option<ModuleRef>,
+}
+
+/// A resolved viewer token: UTF-16 offsets into the symbol's text, a
+/// highlight class (may be empty for link-only identifiers), and the
+/// symbol id the token navigates to, if any.
+type Tok = (u32, u32, &'static str, Option<u32>);
+
+/// One symbol's servable viewer payload.
+pub struct SymbolSource {
+    text: String,
+    toks: Vec<Tok>,
+    norm: NormTree,
+}
+
+fn empty_raw() -> RawSource {
+    RawSource {
+        text: String::new(),
+        syntax: Vec::new(),
+        idents: Vec::new(),
+        norm: NormTree { labels: Vec::new(), children: Vec::new(), spans: Vec::new() },
+    }
+}
+
+/// Capture every symbol's source once (the viewer's only filesystem read —
+/// requests answer from memory). Each file is read and parsed once;
+/// symbols map back to their occurrence by exact byte span (the same
+/// `occ.root.byte_range()` the scan stored). Model-free and feature-free,
+/// like `scan_file_docs`. A file that became unreadable since the scan
+/// leaves its symbols with an empty payload rather than failing the boot.
+pub fn scan_sources(root: &Path, symbols: &[SymbolPrint]) -> Vec<RawSource> {
+    let mut by_file: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, s) in symbols.iter().enumerate() {
+        by_file.entry(s.sym.file.as_str()).or_default().push(i);
+    }
+    let mut out: Vec<RawSource> = (0..symbols.len()).map(|_| empty_raw()).collect();
+    for (file, ids) in by_file {
+        let Ok(source) = std::fs::read(root.join(file)) else { continue };
+        let tree = parse::parse(&source);
+        let imports = normalize::collect_imports(tree.root_node(), &source, file);
+        let occs = parse::extract_functions(&tree, &source, file);
+        let by_span: HashMap<(usize, usize), &parse::FnOccurrence> = occs
+            .iter()
+            .map(|o| ((o.root.byte_range().start, o.root.byte_range().end), o))
+            .collect();
+        for &i in &ids {
+            let span = symbols[i].span;
+            let Some(occ) = by_span.get(&span) else { continue };
+            let slice = &source[span.0..span.1];
+            let Ok(text) = std::str::from_utf8(slice) else {
+                // Invalid UTF-8: byte offsets and UTF-16 offsets diverge —
+                // serve the code as plain text rather than misaligned spans.
+                out[i].text = String::from_utf8_lossy(slice).into_owned();
+                continue;
+            };
+            let locals = normalize::collect_locals(occ.func, &source);
+            let mut syntax = Vec::new();
+            let mut idents = Vec::new();
+            walk_syntax(
+                occ.root, &source, span.0 as u32, &locals, &imports, false,
+                &mut syntax, &mut idents,
+            );
+            out[i] = RawSource {
+                text: text.to_string(),
+                syntax,
+                idents,
+                norm: normalize::normalize(occ.root, occ.func, &source, &imports).tree,
+            };
+        }
+    }
+    out
+}
+
+fn tok_span(node: Node, base: u32) -> (u32, u32) {
+    (node.start_byte() as u32 - base, node.end_byte() as u32 - base)
+}
+
+/// Hand-rolled highlight + link-site walk over one symbol's tree-sitter
+/// subtree. Classes are deliberately few (kw/str/com/num/def/call) — the
+/// page needs legibility, not a theme engine. Link sites skip: locals
+/// (Python shadowing — `collect_locals` is the same binding set Channel A's
+/// alpha-rename trusts), definition names, keyword-argument names, module
+/// names, and anything inside import statements (module wiring, not
+/// references the index can answer for).
+#[allow(clippy::too_many_arguments)]
+fn walk_syntax(
+    node: Node,
+    source: &[u8],
+    base: u32,
+    locals: &HashMap<String, u32>,
+    imports: &normalize::ImportTable,
+    in_import: bool,
+    syntax: &mut Vec<(u32, u32, &'static str)>,
+    idents: &mut Vec<IdentSite>,
+) {
+    match node.kind() {
+        "comment" => {
+            let (s, e) = tok_span(node, base);
+            syntax.push((s, e, "com"));
+        }
+        "string" => {
+            // Quotes and content highlight as string — coalesced into one
+            // token per contiguous run; interpolations are code.
+            let mut run: Option<(u32, u32)> = None;
+            for i in 0..node.child_count() {
+                let c = node.child(i).unwrap();
+                if c.kind() == "interpolation" {
+                    if let Some((s, e)) = run.take() {
+                        syntax.push((s, e, "str"));
+                    }
+                    for j in 0..c.child_count() {
+                        walk_syntax(
+                            c.child(j).unwrap(), source, base, locals, imports,
+                            in_import, syntax, idents,
+                        );
+                    }
+                } else {
+                    let (s, e) = tok_span(c, base);
+                    run = Some(match run {
+                        Some((rs, _)) => (rs, e),
+                        None => (s, e),
+                    });
+                }
+            }
+            if let Some((s, e)) = run {
+                syntax.push((s, e, "str"));
+            }
+        }
+        "integer" | "float" => {
+            let (s, e) = tok_span(node, base);
+            syntax.push((s, e, "num"));
+        }
+        "true" | "false" | "none" => {
+            let (s, e) = tok_span(node, base);
+            syntax.push((s, e, "kw"));
+        }
+        "identifier" => {
+            ident_token(node, source, base, locals, imports, in_import, syntax, idents);
+        }
+        _ => {
+            if !node.is_named() {
+                // Anonymous alphabetic tokens are Python's keywords (def,
+                // return, if, async, …); operators/punctuation stay plain.
+                let text = node.utf8_text(source).unwrap_or("");
+                if !text.is_empty() && text.bytes().all(|b| b.is_ascii_alphabetic()) {
+                    let (s, e) = tok_span(node, base);
+                    syntax.push((s, e, "kw"));
+                }
+                return;
+            }
+            let in_import = in_import
+                || matches!(node.kind(), "import_statement" | "import_from_statement");
+            for i in 0..node.child_count() {
+                walk_syntax(
+                    node.child(i).unwrap(), source, base, locals, imports,
+                    in_import, syntax, idents,
+                );
+            }
+        }
+    }
+}
+
+/// One identifier: classify (def-name / call / plain) and record a link
+/// site when the occurrence could reference a corpus symbol.
+#[allow(clippy::too_many_arguments)]
+fn ident_token(
+    node: Node,
+    source: &[u8],
+    base: u32,
+    locals: &HashMap<String, u32>,
+    imports: &normalize::ImportTable,
+    in_import: bool,
+    syntax: &mut Vec<(u32, u32, &'static str)>,
+    idents: &mut Vec<IdentSite>,
+) {
+    let text = node.utf8_text(source).unwrap_or("");
+    let (s, e) = tok_span(node, base);
+    let field_is = |p: Node, f: &str| {
+        p.child_by_field_name(f).is_some_and(|n| n.id() == node.id())
+    };
+    if let Some(p) = node.parent() {
+        if matches!(p.kind(), "function_definition" | "class_definition") && field_is(p, "name") {
+            syntax.push((s, e, "def"));
+            return;
+        }
+        if p.kind() == "keyword_argument" && field_is(p, "name") {
+            return; // a call-site parameter name, never a reference
+        }
+        if p.kind() == "attribute" && field_is(p, "attribute") {
+            let is_call = p.parent().is_some_and(|gp| {
+                gp.kind() == "call"
+                    && gp.child_by_field_name("function").is_some_and(|f| f.id() == p.id())
+            });
+            if is_call {
+                syntax.push((s, e, "call"));
+            }
+            if !in_import {
+                // `obj.attr`: resolve the object exactly like
+                // `normalize::resolve_attr` — a module binding pins the
+                // module; anything else keeps the base-name fallback.
+                let module = match p.child_by_field_name("object") {
+                    Some(o) if o.kind() == "identifier" => imports
+                        .module_import(o.utf8_text(source).unwrap_or(""))
+                        .cloned(),
+                    _ => None,
+                };
+                idents.push(IdentSite { start: s, end: e, base: text.to_string(), module });
+            }
+            return;
+        }
+        if p.kind() == "call" && field_is(p, "function") {
+            syntax.push((s, e, "call"));
+            bare_site(s, e, text, locals, imports, in_import, idents);
+            return;
+        }
+    }
+    // A bare reference (callback argument, decorator, class access object).
+    bare_site(s, e, text, locals, imports, in_import, idents);
+}
+
+/// A bare name's link site, mirroring `normalize::resolve_bare`: locals
+/// shadow (no site), a from-imported symbol pins `(orig, module)`, a
+/// module binding is a module (no symbol to link), anything else keeps the
+/// corpus base-name fallback.
+fn bare_site(
+    s: u32,
+    e: u32,
+    text: &str,
+    locals: &HashMap<String, u32>,
+    imports: &normalize::ImportTable,
+    in_import: bool,
+    idents: &mut Vec<IdentSite>,
+) {
+    if in_import || text.is_empty() || locals.contains_key(text) {
+        return;
+    }
+    if let Some((orig, module)) = imports.symbol_import(text) {
+        idents.push(IdentSite {
+            start: s,
+            end: e,
+            base: orig.to_string(),
+            module: Some(module.clone()),
+        });
+        return;
+    }
+    if imports.module_import(text).is_some() {
+        return; // the name IS a module, not a symbol
+    }
+    idents.push(IdentSite { start: s, end: e, base: text.to_string(), module: None });
+}
+
+// ── link resolution (pure; runs in `state_from` over the full table) ──
+
+/// The lookup tables `resolve_link` joins against — the same maps
+/// `explain::indegree` builds, kept over ALL symbols (the viewer shows test
+/// code too; `base_name_counts` already counts everything).
+struct LinkIndex<'a> {
+    name_counts: HashMap<&'a str, u32>,
+    by_name: HashMap<&'a str, Vec<u32>>,
+    class_init: HashMap<&'a str, Vec<u32>>,
+    by_name_file: HashMap<(&'a str, &'a str), Vec<u32>>,
+    class_init_file: HashMap<(&'a str, &'a str), Vec<u32>>,
+    module_files: HashMap<String, Vec<&'a str>>,
+}
+
+fn link_index(symbols: &[SymbolPrint]) -> LinkIndex<'_> {
+    let mut idx = LinkIndex {
+        name_counts: explain::base_name_counts(symbols),
+        by_name: HashMap::new(),
+        class_init: HashMap::new(),
+        by_name_file: HashMap::new(),
+        class_init_file: HashMap::new(),
+        module_files: HashMap::new(),
+    };
+    let mut seen_files: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (t, s) in symbols.iter().enumerate() {
+        let file = s.sym.file.as_str();
+        if seen_files.insert(file) {
+            let comps = explain::module_components(file);
+            for start in 0..comps.len() {
+                idx.module_files.entry(comps[start..].join(".")).or_default().push(file);
+            }
+        }
+        let bn = explain::base_name(&s.sym.qname);
+        if !explain::is_dunder(bn) {
+            idx.by_name.entry(bn).or_default().push(t as u32);
+            idx.by_name_file.entry((file, bn)).or_default().push(t as u32);
+        }
+        if let Some(class) = explain::class_of_init(&s.sym.qname) {
+            idx.class_init.entry(class).or_default().push(t as u32);
+            idx.class_init_file.entry((file, class)).or_default().push(t as u32);
+        }
+    }
+    idx
+}
+
+/// Resolve one identifier site inside symbol `i` to a UNIQUE target, or
+/// nothing — the viewer's law is explain's caller law plus uniqueness: a
+/// link must never invent a binding, so any ambiguity renders as plain
+/// text. Same-file candidates resolve first (Python's own scope order);
+/// cross-file unresolved names pass only the `is_real_edge` gates
+/// (corpus-unique AND not an ambient Python name); import-pinned names
+/// resolve within the pinned module's files.
+fn resolve_link(idx: &LinkIndex, symbols: &[SymbolPrint], i: usize, site: &IdentSite) -> Option<u32> {
+    let base = site.base.as_str();
+    if explain::is_dunder(base) {
+        return None;
+    }
+    let gather = |a: Option<&Vec<u32>>, b: Option<&Vec<u32>>| -> Vec<u32> {
+        let mut v: Vec<u32> = a
+            .into_iter()
+            .flatten()
+            .chain(b.into_iter().flatten())
+            .copied()
+            .filter(|&t| t as usize != i)
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    match &site.module {
+        Some(ModuleRef::Absolute(m)) => {
+            let files = idx.module_files.get(m.as_str())?;
+            let mut v = Vec::new();
+            for f in files {
+                v.extend(gather(
+                    idx.by_name_file.get(&(*f, base)),
+                    idx.class_init_file.get(&(*f, base)),
+                ));
+            }
+            v.sort_unstable();
+            v.dedup();
+            (v.len() == 1).then(|| v[0])
+        }
+        None => {
+            let file = symbols[i].sym.file.as_str();
+            let same = gather(
+                idx.by_name_file.get(&(file, base)),
+                idx.class_init_file.get(&(file, base)),
+            );
+            if same.len() == 1 {
+                return Some(same[0]);
+            }
+            if !same.is_empty() {
+                return None; // same-file ambiguity: plain text
+            }
+            if idx.name_counts.get(base).copied().unwrap_or(0) >= 2
+                || explain::is_ambient_name(base)
+            {
+                return None; // the exact is_real_edge cross-file gates
+            }
+            let all = gather(idx.by_name.get(base), idx.class_init.get(base));
+            (all.len() == 1).then(|| all[0])
+        }
+    }
+}
+
+/// Byte offset → UTF-16 code-unit offset for every position in `text`
+/// (JS strings index in UTF-16; the page slices the shipped text directly).
+fn utf16_map(text: &str) -> Vec<u32> {
+    let mut map = vec![0u32; text.len() + 1];
+    let mut u = 0u32;
+    for (bi, ch) in text.char_indices() {
+        for b in bi..bi + ch.len_utf8() {
+            map[b] = u;
+        }
+        u += ch.len_utf16() as u32;
+    }
+    map[text.len()] = u;
+    map
+}
+
+/// Resolve captured sources against the full symbol table: link sites become
+/// link toks (unresolved ones vanish — plain text), spans convert to UTF-16.
+fn resolve_sources(raw: Vec<RawSource>, symbols: &[SymbolPrint]) -> Vec<SymbolSource> {
+    let idx = link_index(symbols);
+    raw.into_iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let mut toks: Vec<Tok> = r.syntax.iter().map(|&(s, e, c)| (s, e, c, None)).collect();
+            for site in &r.idents {
+                let Some(t) = resolve_link(&idx, symbols, i, site) else { continue };
+                match toks.iter_mut().find(|k| k.0 == site.start && k.1 == site.end) {
+                    Some(k) => k.3 = Some(t),
+                    None => toks.push((site.start, site.end, "", Some(t))),
+                }
+            }
+            toks.sort_unstable_by_key(|k| (k.0, k.1));
+            let map = utf16_map(&r.text);
+            for k in &mut toks {
+                k.0 = map[k.0 as usize];
+                k.1 = map[k.1 as usize];
+            }
+            SymbolSource { text: r.text, toks, norm: r.norm }
+        })
+        .collect()
+}
+
 /// Assemble the server state from an analysis + aligned embeddings. Pure
 /// (PCA + JSON pre-rendering); the model never enters here, so tests build
 /// states from synthetic vectors.
+#[allow(clippy::too_many_arguments)]
 pub fn state_from(
     repo_name: &str,
     cfg: Config,
     analysis: Analysis,
     embeddings: Vec<Vec<f32>>,
     file_docs: Vec<FileDoc>,
+    raw_sources: Vec<RawSource>,
     tests_default: bool,
     branch: Option<BranchInfo>,
 ) -> ExploreState {
@@ -288,6 +732,12 @@ pub fn state_from(
         symbols.len(),
         "one embedding per symbol is the state contract"
     );
+    assert_eq!(
+        raw_sources.len(),
+        symbols.len(),
+        "one captured source per symbol is the state contract"
+    );
+    let sources = resolve_sources(raw_sources, symbols);
     let indeg = explain::indegree(symbols);
     let p = pca::pca(&embeddings, 8);
     let pca_scores: Vec<Vec<f32>> = if p.scores.is_empty() {
@@ -433,6 +883,7 @@ pub fn state_from(
         world_radii: radii,
         full_xy,
         prod_xy: xy,
+        sources,
         symbols_json,
         meta_json,
         page,
@@ -475,6 +926,17 @@ pub fn respond(state: &ExploreState, url: &str) -> Resp {
         },
         "/api/explain" => match parse_id(state, query) {
             Ok(id) => json_ok(explain_json(state, id).to_string().into_bytes()),
+            Err(r) => r,
+        },
+        "/api/source" => match parse_id(state, query) {
+            Ok(id) => json_ok(source_json(state, id).to_string().into_bytes()),
+            Err(r) => r,
+        },
+        "/api/compare" => match parse_id(state, query) {
+            Ok(id) => match compare_json(state, id, query) {
+                Ok(v) => json_ok(v.to_string().into_bytes()),
+                Err(r) => r,
+            },
             Err(r) => r,
         },
         "/api/anchor" => match parse_id(state, query) {
@@ -663,6 +1125,76 @@ fn nearest_existing(state: &ExploreState, id: usize) -> Value {
     Value::Array(rows)
 }
 
+/// `/api/source` (TKI-61): one symbol's viewer payload — full source text,
+/// highlight/link tokens as `[start, end, class, link-id|null]` with
+/// UTF-16 offsets. Everything was resolved at boot; this is a read.
+fn source_json(state: &ExploreState, id: usize) -> Value {
+    let s = &state.analysis.scanned.symbols[id];
+    let src = &state.sources[id];
+    json!({
+        "id": id,
+        "qname": s.sym.qname,
+        "file": s.sym.file,
+        "line": s.sym.line,
+        "is_test": s.is_test,
+        "text": src.text,
+        "toks": src.toks.iter()
+            .map(|t| json!([t.0, t.1, t.2, t.3]))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// The compare view's default right-hand side: the top embedding-ranked
+/// symbol other than the selection — the same ranking discipline the
+/// card's `nearest_existing` uses (test symbols excluded unless the
+/// selection is itself a test symbol). THE LAW (DESIGN.md §1.2): the model
+/// only picks WHICH symbol; no semantic number ships anywhere.
+fn nearest_neighbor(state: &ExploreState, id: usize) -> Option<usize> {
+    let symbols = &state.analysis.scanned.symbols;
+    let candidates: Vec<(usize, &[f32])> = (0..symbols.len())
+        .filter(|&j| j != id && (symbols[id].is_test || !symbols[j].is_test))
+        .map(|j| (j, state.embeddings[j].as_slice()))
+        .collect();
+    crate::find::rank(&state.embeddings[id], &candidates, 1)
+        .first()
+        .map(|&(j, _)| j)
+}
+
+/// `/api/compare?id=<a>[&b=<b>]` (TKI-61): both sides' viewer payloads plus
+/// `align::align`'s deterministic shared-region pairs (tier 1 = identical
+/// after whitespace collapse, tier 2 = structurally aligned near-miss).
+/// Region offsets are UTF-16 into each side's text. No similarity number
+/// appears here — the card already carries the deterministic A/B cosines.
+fn compare_json(state: &ExploreState, id: usize, query: &str) -> Result<Value, Resp> {
+    let symbols = &state.analysis.scanned.symbols;
+    let bid = match param(query, "b") {
+        Some(raw) => {
+            let b: usize = raw.parse().map_err(|_| error(400, "b must be an integer"))?;
+            if b >= symbols.len() {
+                return Err(error(404, "no symbol with that id"));
+            }
+            b
+        }
+        None => nearest_neighbor(state, id)
+            .ok_or_else(|| error(404, "no comparison candidate"))?,
+    };
+    let (sa, sb) = (&state.sources[id], &state.sources[bid]);
+    let regions = align::align(
+        &sa.norm, &sa.text, symbols[id].span.0 as u32,
+        &sb.norm, &sb.text, symbols[bid].span.0 as u32,
+    );
+    let (ma, mb) = (utf16_map(&sa.text), utf16_map(&sb.text));
+    Ok(json!({
+        "a": source_json(state, id),
+        "b": source_json(state, bid),
+        "regions": regions.iter().map(|r| json!({
+            "a": [ma[r.a.0 as usize], ma[r.a.1 as usize]],
+            "b": [mb[r.b.0 as usize], mb[r.b.1 as usize]],
+            "tier": r.tier,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
 /// Drill-down (TKI-54): the layout pipeline re-run over the symbols under
 /// `path` — a directory prefix (segment-bounded: `a/b` matches `a/b/…`,
 /// never `a/bc.py`) or a single file. `None` when nothing lives there.
@@ -833,8 +1365,12 @@ pub fn build_state(
     // TKI-56: module-docstring prevalence, per file — boot's own filesystem
     // work, same as the scan above.
     let file_docs = scan_file_docs(root);
+    // TKI-61: viewer sources — the last boot-time filesystem pass.
+    let raw_sources = scan_sources(root, &analysis.scanned.symbols);
     Ok((
-        state_from(&repo_name, cfg, analysis, embeddings, file_docs, tests_default, branch),
+        state_from(
+            &repo_name, cfg, analysis, embeddings, file_docs, raw_sources, tests_default, branch,
+        ),
         embedder,
     ))
 }
