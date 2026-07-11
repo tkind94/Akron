@@ -17,6 +17,7 @@ pub mod parse;
 pub mod pca;
 pub mod queries;
 pub mod report;
+pub mod review;
 pub mod run;
 pub mod scan;
 pub mod types;
