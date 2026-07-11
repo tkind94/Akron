@@ -41,18 +41,29 @@
 //! (global-coordinate seeding, drill-relative color keys). Computed per
 //! request — a pure function of the immutable state, so it is exactly as
 //! deterministic as the launch-time layout.
+//!
+//! Convention prevalence (TKI-56): the start card's one factual line —
+//! `module docstring: 14 of 19 files`. `file_docs` classifies every scanned
+//! `.py` file once at boot (`has_module_docstring`, model-free, feature-free)
+//! and ships the raw per-file list in `/api/meta`; the page scopes the count
+//! to the current drill (root = whole repo, a dir drill = that dir's files,
+//! a file drill has no prevalence to report) the same way it already scopes
+//! "largest dirs"/"most callers" — client-side filtering over an immutable
+//! list, never a second server round trip.
 
 use crate::branch::BranchInfo;
 use crate::explain;
 use crate::fingerprint;
 use crate::history;
 use crate::layout;
+use crate::parse;
 use crate::pca;
 use crate::run::Analysis;
 use crate::types::Config;
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::path::Path;
+use tree_sitter::Node;
 
 pub const DEFAULT_PORT: u16 = 4816;
 
@@ -181,6 +192,84 @@ fn world_radii(symbols: &[crate::types::SymbolPrint]) -> Vec<f32> {
         .collect()
 }
 
+/// One file's module-docstring fact (TKI-56), plus enough context
+/// (`is_test`) for the panel to respect the tests toggle. Passive data —
+/// no methods, no hidden state.
+pub struct FileDoc {
+    pub file: String,
+    pub is_test: bool,
+    pub has_docstring: bool,
+}
+
+/// Every `.py` file under `root`, module-docstring classified — the same
+/// file list and rel-path convention `scan.rs::process_file` uses, so
+/// `file` lines up with `SymbolPrint.sym.file`. Model-free (no `semantic`
+/// gate): this is boot's own filesystem work, not the model's, so it runs
+/// and tests identically in both build configs. Sorted by file so the
+/// output (and the JSON built from it) doesn't depend on walk order.
+pub fn scan_file_docs(root: &Path) -> Vec<FileDoc> {
+    let mut docs: Vec<FileDoc> = parse::python_files(root)
+        .into_iter()
+        .filter_map(|path| {
+            let rel = path.strip_prefix(root).unwrap_or(&path).display().to_string();
+            let source = std::fs::read(&path).ok()?;
+            Some(FileDoc {
+                is_test: parse::is_test_path(&rel),
+                has_docstring: has_module_docstring(&source),
+                file: rel,
+            })
+        })
+        .collect();
+    docs.sort_by(|a, b| a.file.cmp(&b.file));
+    docs
+}
+
+/// A module docstring, matching Python's own `__doc__` rule: the file's
+/// first top-level statement — comments and blank lines don't count, but
+/// any other statement (e.g. `from __future__ import annotations`) does —
+/// is a bare, non-interpolated, non-f string literal.
+pub fn has_module_docstring(source: &[u8]) -> bool {
+    let tree = parse::parse(source);
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+    let Some(first) = root.children(&mut cursor).find(|c| c.kind() != "comment") else {
+        return false;
+    };
+    if first.kind() != "expression_statement" || first.named_child_count() != 1 {
+        return false;
+    }
+    match first.named_child(0) {
+        Some(s) if s.kind() == "string" => is_plain_string(s, source),
+        _ => false,
+    }
+}
+
+/// A `string` node counts as a docstring only if it carries no `{}`
+/// interpolation and no `f`/`F` prefix — an f-string is never assigned to
+/// `__doc__` even with zero braces, since the prefix alone routes it
+/// through `JoinedStr` rather than a plain string constant.
+fn is_plain_string(node: Node, source: &[u8]) -> bool {
+    let mut cursor = node.walk();
+    for c in node.children(&mut cursor) {
+        match c.kind() {
+            "interpolation" => return false,
+            "string_start" => {
+                let prefix: String = c
+                    .utf8_text(source)
+                    .unwrap_or("")
+                    .chars()
+                    .take_while(|ch| *ch != '"' && *ch != '\'')
+                    .collect();
+                if prefix.to_lowercase().contains('f') {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
 /// Assemble the server state from an analysis + aligned embeddings. Pure
 /// (PCA + JSON pre-rendering); the model never enters here, so tests build
 /// states from synthetic vectors.
@@ -189,6 +278,7 @@ pub fn state_from(
     cfg: Config,
     analysis: Analysis,
     embeddings: Vec<Vec<f32>>,
+    file_docs: Vec<FileDoc>,
     tests_default: bool,
     branch: Option<BranchInfo>,
 ) -> ExploreState {
@@ -312,6 +402,14 @@ pub fn state_from(
             "base": b.base,
             "changed": branch_new.iter().filter(|&&x| x).count(),
         })),
+        // TKI-56: the raw per-file fact list — the page scopes it to the
+        // current drill (client-side), the same way it scopes the other
+        // guide-panel facts over `/api/symbols`.
+        "file_docs": file_docs.iter().map(|f| json!({
+            "file": f.file,
+            "is_test": f.is_test,
+            "doc": f.has_docstring,
+        })).collect::<Vec<_>>(),
     });
     let meta_json = meta.to_string().into_bytes();
 
@@ -732,8 +830,11 @@ pub fn build_state(
         .unwrap_or_else(|| root.display().to_string());
     // Branch context (TKI-53): resolved once here; None degrades silently.
     let branch = crate::branch::detect(root, base);
+    // TKI-56: module-docstring prevalence, per file — boot's own filesystem
+    // work, same as the scan above.
+    let file_docs = scan_file_docs(root);
     Ok((
-        state_from(&repo_name, cfg, analysis, embeddings, tests_default, branch),
+        state_from(&repo_name, cfg, analysis, embeddings, file_docs, tests_default, branch),
         embedder,
     ))
 }
