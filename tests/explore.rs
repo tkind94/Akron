@@ -651,6 +651,47 @@ fn anchor_rejects_bad_ids() {
     assert_eq!(explore::respond(&state, "/api/anchor?id=999999").status, 404);
 }
 
+// ── /api/edge (TKI-66 edge identity) ──
+
+#[test]
+fn edge_endpoint_serves_shared_vocabulary_terms_only() {
+    let state = fixture_state();
+    let symbols = &state.analysis.scanned.symbols;
+    // the planted clone pair shares its whole vocabulary — terms guaranteed
+    let a = symbols.iter().position(|s| s.sym.file == "clone_original.py").unwrap();
+    let b = symbols.iter().position(|s| s.sym.file == "clone_renamed.py").unwrap();
+    let resp = explore::respond(&state, &format!("/api/edge?a={a}&b={b}"));
+    assert_eq!(resp.status, 200);
+    let v = json(&resp);
+    assert_eq!(v["a"], a);
+    assert_eq!(v["b"], b);
+    let terms = v["terms"].as_array().expect("terms array");
+    assert!(!terms.is_empty() && terms.len() <= 3, "top-k shared terms: {terms:?}");
+    assert!(terms.iter().all(|t| t.is_string()));
+    // exactly the ref fields + terms — no cosine, no model number (§1.2)
+    let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["a", "b", "terms"]);
+}
+
+#[test]
+fn edge_rejects_bad_ids() {
+    let state = fixture_state();
+    assert_eq!(explore::respond(&state, "/api/edge").status, 400);
+    assert_eq!(explore::respond(&state, "/api/edge?a=0").status, 400);
+    assert_eq!(explore::respond(&state, "/api/edge?a=0&b=abc").status, 400);
+    assert_eq!(explore::respond(&state, "/api/edge?a=999999&b=0").status, 404);
+    assert_eq!(explore::respond(&state, "/api/edge?a=0&b=999999").status, 404);
+}
+
+#[test]
+fn edge_endpoint_is_byte_identical_across_two_state_builds() {
+    let url = "/api/edge?a=0&b=1";
+    let a = explore::respond(&fixture_state(), url);
+    let b = explore::respond(&fixture_state(), url);
+    assert_eq!(a.body, b.body, "/api/edge must be deterministic");
+}
+
 // ── / and unknown paths ──
 
 #[test]

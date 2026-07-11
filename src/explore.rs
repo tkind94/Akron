@@ -55,6 +55,11 @@
 //! deterministic shared-region pairs. Offsets are UTF-16 code units so the
 //! page slices its JS strings directly.
 //!
+//! Edge identity (TKI-66): `/api/edge?a=&b=` names what a kNN edge is made
+//! of — the pair's top shared Channel-B vocabulary terms (`shared_terms`,
+//! deterministic), so hovering an edge answers "what code am I exploring
+//! along". Pure read over the boot-time vocab index; no model number ships.
+//!
 //! Convention prevalence (TKI-56): the start card's one factual line —
 //! `module docstring: 14 of 19 files`. `file_docs` classifies every scanned
 //! `.py` file once at boot (`has_module_docstring`, model-free, feature-free)
@@ -943,6 +948,10 @@ pub fn respond(state: &ExploreState, url: &str) -> Resp {
             Ok(id) => json_ok(anchor_json(state, id).to_string().into_bytes()),
             Err(r) => r,
         },
+        "/api/edge" => match (parse_sym(state, query, "a"), parse_sym(state, query, "b")) {
+            (Ok(a), Ok(b)) => json_ok(edge_json(state, a, b).to_string().into_bytes()),
+            (Err(r), _) | (_, Err(r)) => r,
+        },
         _ => error(404, "no such endpoint"),
     }
 }
@@ -999,10 +1008,16 @@ fn error(status: u16, msg: &str) -> Resp {
 /// `id=<n>` from a query string, bounds-checked against the symbol table:
 /// missing/malformed → 400, out of range → 404.
 fn parse_id(state: &ExploreState, query: &str) -> Result<usize, Resp> {
-    let raw = param(query, "id").ok_or_else(|| error(400, "missing id parameter"))?;
+    parse_sym(state, query, "id")
+}
+
+/// A named symbol-id parameter, same contract as `parse_id`.
+fn parse_sym(state: &ExploreState, query: &str, name: &str) -> Result<usize, Resp> {
+    let raw =
+        param(query, name).ok_or_else(|| error(400, &format!("missing {name} parameter")))?;
     let id: usize = raw
         .parse()
-        .map_err(|_| error(400, "id must be an integer"))?;
+        .map_err(|_| error(400, &format!("{name} must be an integer")))?;
     if id >= state.analysis.scanned.symbols.len() {
         return Err(error(404, "no symbol with that id"));
     }
@@ -1328,6 +1343,17 @@ fn anchor_json(state: &ExploreState, id: usize) -> Value {
         .map(|i| state.analysis.vocab.cosine_between(i as u32, id as u32))
         .collect();
     json!({ "id": id, "a_cos": a_cos, "b_cos": b_cos })
+}
+
+/// `/api/edge?a=&b=` (TKI-66): what a layout edge is made of — the top
+/// shared vocabulary terms between two symbols, `cluster.rs`'s own
+/// `shared_terms` (Channel B, deterministic; term ids are canonical, so the
+/// answer is byte-stable across boots). The page labels a hovered edge with
+/// them; empty when the pair shares no weighted vocabulary. No model
+/// number ships here (§1.2) — terms only.
+fn edge_json(state: &ExploreState, a: usize, b: usize) -> Value {
+    let terms = state.analysis.vocab.shared_terms(a as u32, b as u32, 3);
+    json!({ "a": a, "b": b, "terms": terms })
 }
 
 // ── launch (model + tiny_http; `semantic` builds only) ──
