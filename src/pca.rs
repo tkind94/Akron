@@ -187,8 +187,35 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
+/// `m` (d×d, row-major) times `v`. TKI-59: rows are computed 4 at a time
+/// with 4 independent accumulators — the single-chain `dot` is bound by
+/// f64 add latency, and this is the power iteration's whole cost. Each
+/// row keeps `dot`'s exact ascending-element order, so every output
+/// element is bit-identical to `dot(&m[i*d..], v)`. (8 lanes measured
+/// ~2x SLOWER than 4 here — register pressure; don't widen it back.)
 fn mat_vec(m: &[f64], v: &[f64], d: usize) -> Vec<f64> {
-    (0..d).map(|i| dot(&m[i * d..(i + 1) * d], v)).collect()
+    let mut out = Vec::with_capacity(d);
+    let mut i = 0;
+    while i + 4 <= d {
+        let r0 = &m[i * d..i * d + d];
+        let r1 = &m[(i + 1) * d..(i + 1) * d + d];
+        let r2 = &m[(i + 2) * d..(i + 2) * d + d];
+        let r3 = &m[(i + 3) * d..(i + 3) * d + d];
+        let (mut s0, mut s1, mut s2, mut s3) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        for (t, &x) in v.iter().enumerate() {
+            s0 += r0[t] * x;
+            s1 += r1[t] * x;
+            s2 += r2[t] * x;
+            s3 += r3[t] * x;
+        }
+        out.extend_from_slice(&[s0, s1, s2, s3]);
+        i += 4;
+    }
+    while i < d {
+        out.push(dot(&m[i * d..(i + 1) * d], v));
+        i += 1;
+    }
+    out
 }
 
 /// Subtract `v`'s projection onto each of `basis` (all unit vectors) — the

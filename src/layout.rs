@@ -38,17 +38,58 @@ const TEMP0: f64 = 0.06;
 
 /// `k` nearest neighbors of every row by cosine (inputs are L2-normalized,
 /// so plain dot), self excluded, ties broken on lower index.
+///
+/// TKI-59: the dots are computed 8 candidate rows at a time (`dot8`) and
+/// the top-k comes from an exact select-then-sort instead of a full sort.
+/// Both are bit-identical to the naive form: each dot keeps its own
+/// accumulator in the same ascending-element order, and the (score desc,
+/// index asc) comparator is a strict total order, so partition + sort of
+/// the top `k` yields exactly the prefix the full sort would.
 pub fn knn(embeddings: &[Vec<f32>], k: usize) -> Vec<Vec<u32>> {
     let n = embeddings.len();
+    let keep = k.min(n.saturating_sub(1));
     (0..n)
         .into_par_iter()
         .map(|i| {
-            let mut scored: Vec<(f32, u32)> = (0..n)
-                .filter(|&j| j != i)
-                .map(|j| (dot(&embeddings[i], &embeddings[j]), j as u32))
-                .collect();
-            scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-            scored.truncate(k.min(n.saturating_sub(1)));
+            if keep == 0 {
+                return Vec::new();
+            }
+            let a = &embeddings[i];
+            let mut scored: Vec<(f32, u32)> = Vec::with_capacity(n - 1);
+            let mut j = 0;
+            while j + 8 <= n {
+                let s = dot8(
+                    a,
+                    [
+                        &embeddings[j],
+                        &embeddings[j + 1],
+                        &embeddings[j + 2],
+                        &embeddings[j + 3],
+                        &embeddings[j + 4],
+                        &embeddings[j + 5],
+                        &embeddings[j + 6],
+                        &embeddings[j + 7],
+                    ],
+                );
+                for (t, &sv) in s.iter().enumerate() {
+                    if j + t != i {
+                        scored.push((sv, (j + t) as u32));
+                    }
+                }
+                j += 8;
+            }
+            while j < n {
+                if j != i {
+                    scored.push((dot(a, &embeddings[j]), j as u32));
+                }
+                j += 1;
+            }
+            let cmp = |a: &(f32, u32), b: &(f32, u32)| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1));
+            if scored.len() > keep {
+                scored.select_nth_unstable_by(keep - 1, cmp);
+                scored.truncate(keep);
+            }
+            scored.sort_unstable_by(cmp);
             scored.into_iter().map(|(_, j)| j).collect()
         })
         .collect()
@@ -56,6 +97,29 @@ pub fn knn(embeddings: &[Vec<f32>], k: usize) -> Vec<Vec<u32>> {
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+/// Dots of `a` against 8 rows at once — 8 independent accumulator chains
+/// hide the scalar f32 add latency the single-chain `dot` is bound by.
+/// Each lane's accumulation order is exactly `dot`'s (ascending elements,
+/// one accumulator), so every result is bit-identical to `dot(a, b[l])`.
+fn dot8(a: &[f32], b: [&[f32]; 8]) -> [f32; 8] {
+    let d = a.len();
+    let (b0, b1, b2, b3) = (&b[0][..d], &b[1][..d], &b[2][..d], &b[3][..d]);
+    let (b4, b5, b6, b7) = (&b[4][..d], &b[5][..d], &b[6][..d], &b[7][..d]);
+    let mut s = [0.0f32; 8];
+    for t in 0..d {
+        let x = a[t];
+        s[0] += x * b0[t];
+        s[1] += x * b1[t];
+        s[2] += x * b2[t];
+        s[3] += x * b3[t];
+        s[4] += x * b4[t];
+        s[5] += x * b5[t];
+        s[6] += x * b6[t];
+        s[7] += x * b7[t];
+    }
+    s
 }
 
 /// The edge set the layout springs act on: *mutual* kNN pairs (each lists
@@ -235,16 +299,25 @@ pub fn relax(pos: &mut [(f32, f32)], radii: &[f32]) {
     }
     let cell = 2.0 * rmax; // any overlapping pair is within one cell ring
     let key = |x: f64, y: f64| ((x / cell).floor() as i64, (y / cell).floor() as i64);
+    // Grid + candidate buffers live across sweeps (TKI-59): rebuilding the
+    // HashMap (and every cell's Vec) each sweep was pure allocation churn.
+    // Cells emptied by movement keep an empty Vec — `get` on them adds no
+    // candidates, so the candidate SET per point is unchanged, and the
+    // sort below already makes cell order irrelevant. Bit-exact.
+    let mut grid: std::collections::HashMap<(i64, i64), Vec<u32>> =
+        std::collections::HashMap::new();
+    let mut cands: Vec<u32> = Vec::new();
     for _ in 0..RELAX_SWEEPS {
-        let mut grid: std::collections::HashMap<(i64, i64), Vec<u32>> =
-            std::collections::HashMap::new();
+        for v in grid.values_mut() {
+            v.clear();
+        }
         for (i, &(x, y)) in p.iter().enumerate() {
             grid.entry(key(x, y)).or_default().push(i as u32);
         }
         let mut moved = false;
         for i in 0..n {
             let (gx, gy) = key(p[i].0, p[i].1);
-            let mut cands: Vec<u32> = Vec::new();
+            cands.clear();
             for dx in -1..=1i64 {
                 for dy in -1..=1i64 {
                     if let Some(v) = grid.get(&(gx + dx, gy + dy)) {
@@ -253,7 +326,7 @@ pub fn relax(pos: &mut [(f32, f32)], radii: &[f32]) {
                 }
             }
             cands.sort_unstable(); // grid cell order must not matter
-            for j in cands {
+            for &j in &cands {
                 let j = j as usize;
                 let (dx, dy) = (p[j].0 - p[i].0, p[j].1 - p[i].1);
                 let d2 = dx * dx + dy * dy;
