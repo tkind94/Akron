@@ -1,6 +1,6 @@
 ---
 name: akron
-description: Consult Akron's derived shape/vocabulary landscape before writing new code, when searching for where a behavior is handled (`akron find`), or before modifying an unfamiliar symbol (`akron explain`). Use whenever writing a new helper/function in a repo, when searching for where a behavior is handled, or before modifying an unfamiliar symbol.
+description: Consult Akron's derived shape/vocabulary landscape before writing new code, when searching for where a behavior is handled (`akron find`), before modifying an unfamiliar symbol (`akron explain`), or when reviewing a diff/PR (`akron review`). Use whenever writing a new helper/function in a repo, when searching for where a behavior is handled, before modifying an unfamiliar symbol, or before/while reviewing someone else's (or your own) branch.
 ---
 
 # Akron: consult the pattern landscape instead of reinventing it
@@ -8,7 +8,7 @@ description: Consult Akron's derived shape/vocabulary landscape before writing n
 Akron recomputes a repo's shape/vocabulary landscape (repeated shapes,
 shared-vocabulary/divergent-shape pairs, drift) from code + git history on
 every run — nothing here is prose that can rot, and nothing here is stored.
-This skill is the CLI contract for three moments (JOURNEYS.md J1-J4, J9-J10).
+This skill is the CLI contract for four moments (JOURNEYS.md J1-J4, J9-J10).
 Depth: README.md, JOURNEYS.md, DESIGN.md.
 
 All flags/fields below are verified against the `akron` binary (`--help` on
@@ -84,6 +84,41 @@ Nth copy.
 Each entry's `ref` is stable within a working tree — it is that entry's own
 1-based position in its array (`R1`, `R2`, ... `F1`, ... `C1`, ...), so it
 never has to be re-derived (TKI-27).
+
+## 4. Before/while reviewing a diff or PR
+
+Run `akron review <root> [--base <ref>]` (`--base`: default is the repo's
+default branch — `origin/HEAD` if set, else `main`, else `master`, same
+resolution as `explore`'s `--base`). For each symbol that's branch-new or
+changed since the merge-base with `<ref>` (committed + working-tree +
+untracked, content-anchored — a moved-but-unchanged symbol never lights
+up), prints one evidence block, facts only, no verdicts:
+- **where it sits** — file, directory, production or test.
+- **nearest existing** — top-3 embedding-ranked existing (non-test,
+  non-changed) symbols, each annotated with Channel-A (structure) and
+  Channel-B (vocabulary) cosine to the changed symbol. Needs a build with
+  the `semantic` feature; without it this section reports "unavailable"
+  and every other section still runs.
+- **also review** — top-3 confidence-ranked files that historically
+  co-change with this symbol's file (`coupling::mine`, git history), excluding
+  anything already in the diff — `"changes with settings.py in 38 of 42
+  commits"`. Silently empty when the file has too little history
+  (`InsufficientHistory`) or was never committed.
+- **prevalence** — module-docstring count and symbol count, both scoped to
+  the symbol's own directory (`"3 of 5 files documented in scrapy/core"`,
+  `"one of 19 symbols in scrapy/core"`).
+
+`--json` for scripting (`"schema": "akron.review/v1"`, sorted keys/arrays,
+byte-identical across runs on identical repo state). Exit 0 with "no
+changed symbols" stated plainly when the working tree sits on the base
+branch (or any other reason branch context is absent) — that's a normal
+result, not an error; exit 2 only for a genuine operational error (not a
+repo, a `--base` that doesn't resolve).
+
+Use this to focus review time on what actually changed instead of skimming
+a whole PR diff blind, to catch "this looks like a fresh rewrite of
+something that already exists" (`nearest existing`), and to know what else
+a change like this one usually touches (`also review`) before approving.
 
 ## Worked example
 
