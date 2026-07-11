@@ -1,6 +1,8 @@
+pub mod align;
 pub mod branch;
 pub mod callrel;
 pub mod cluster;
+pub mod coupling;
 #[cfg(feature = "semantic")]
 pub mod embed;
 pub mod explain;
