@@ -11,6 +11,11 @@ use xxhash_rust::xxh3::xxh3_64;
 // is restored downstream by the WL-cosine threshold, not by the LSH.
 const LSH_BANDS: usize = 32;
 const LSH_ROWS: usize = MINHASH_FNS / LSH_BANDS;
+/// Fixed size of a banding key (one band byte + `LSH_ROWS` `u64`s): a
+/// compile-time constant, so the key can live on the stack instead of a
+/// fresh heap `Vec` per (symbol, band) — profiled allocation hot spot
+/// (TKI-58): this loop runs `symbols.len() * LSH_BANDS` times.
+const LSH_KEY_LEN: usize = 1 + LSH_ROWS * 8;
 /// Buckets larger than this are generic shapes (e.g. tiny wrappers); pairing
 /// them is quadratic noise. Logged, not silent (DESIGN.md: no silent caps).
 const MAX_BUCKET: usize = 200;
@@ -126,10 +131,11 @@ pub fn shape_clusters(symbols: &[SymbolPrint], theta_clone: f32) -> ShapeCluster
     let mut buckets: HashMap<u64, Vec<u32>> = HashMap::new();
     for (i, s) in symbols.iter().enumerate() {
         for band in 0..LSH_BANDS {
-            let mut key = Vec::with_capacity(LSH_ROWS * 8 + 1);
-            key.push(band as u8);
+            let mut key = [0u8; LSH_KEY_LEN];
+            key[0] = band as u8;
             for r in 0..LSH_ROWS {
-                key.extend_from_slice(&s.minhash[band * LSH_ROWS + r].to_le_bytes());
+                let bytes = s.minhash[band * LSH_ROWS + r].to_le_bytes();
+                key[1 + r * 8..1 + (r + 1) * 8].copy_from_slice(&bytes);
             }
             buckets.entry(xxh3_64(&key)).or_default().push(i as u32);
         }
