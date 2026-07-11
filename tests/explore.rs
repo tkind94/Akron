@@ -49,12 +49,14 @@ fn fixture_state_with(branch: Option<BranchInfo>) -> ExploreState {
     let n = analysis.scanned.symbols.len();
     assert!(n > 0, "fixtures must yield symbols at min_nodes=8");
     let docs = explore::scan_file_docs(&fixtures_root());
+    let sources = explore::scan_sources(&fixtures_root(), &analysis.scanned.symbols);
     explore::state_from(
         "fixtures",
         cfg,
         analysis,
         synthetic_embeddings(n, 24),
         docs,
+        sources,
         false,
         branch,
     )
@@ -286,12 +288,14 @@ fn drill_tree_state() -> (tempfile::TempDir, ExploreState) {
     let n = analysis.scanned.symbols.len();
     assert_eq!(n, 7, "the planted tree yields all 7 symbols");
     let docs = explore::scan_file_docs(dir.path());
+    let sources = explore::scan_sources(dir.path(), &analysis.scanned.symbols);
     let state = explore::state_from(
         "drill",
         cfg,
         analysis,
         synthetic_embeddings(n, 24),
         docs,
+        sources,
         false,
         None,
     );
@@ -678,6 +682,304 @@ fn unknown_paths_are_404() {
     assert_eq!(explore::respond(&state, "/favicon.ico").status, 200);
 }
 
+// ── /api/source + /api/compare (TKI-61 viewer loop) ──
+
+/// UTF-16 slice of `text` — exactly what the page's JS `String.slice` does
+/// with the shipped offsets.
+fn utf16_slice(text: &str, s: u64, e: u64) -> String {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    String::from_utf16(&units[s as usize..e as usize]).expect("offsets on char boundaries")
+}
+
+fn sym_id(state: &ExploreState, qname: &str) -> usize {
+    state
+        .analysis
+        .scanned
+        .symbols
+        .iter()
+        .position(|s| s.sym.qname == qname)
+        .unwrap_or_else(|| panic!("planted symbol {qname} present"))
+}
+
+/// A planted tree exercising the viewer's link laws: same-file unique,
+/// import-pinned cross-file, duplicate-name ambiguity, ambient names,
+/// local shadowing, and a non-ASCII literal for UTF-16 offsets.
+fn viewer_tree_state() -> (tempfile::TempDir, ExploreState) {
+    let dir = tempfile::Builder::new()
+        .prefix("akron-viewer-test-")
+        .tempdir()
+        .expect("tempdir");
+    let write = |rel: &str, src: &str| {
+        let p = dir.path().join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, src).unwrap();
+    };
+    write(
+        "pkg/core.py",
+        concat!(
+            "def parse_row(line):\n",
+            "    parts = line.split(',')\n",
+            "    cleaned = [p for p in parts if p]\n",
+            "    return cleaned\n",
+            "\n",
+            "def load_rows(path):\n",
+            "    # read the file\n",
+            "    rows = []\n",
+            "    with open(path) as fh:\n",
+            "        for line in fh:\n",
+            "            if line:\n",
+            "                rows.append(parse_row(line))\n",
+            "    return rows\n",
+        ),
+    );
+    write(
+        "pkg/dup_a.py",
+        "def transform(x):\n    out = []\n    for v in x:\n        out.append(v * 2)\n    return out\n",
+    );
+    write(
+        "pkg/dup_b.py",
+        "def transform(x):\n    out = []\n    for v in x:\n        out.append(v * 3)\n    return out\n",
+    );
+    write(
+        "pkg/use.py",
+        concat!(
+            "from pkg.core import load_rows\n",
+            "\n",
+            "def run_all(paths):\n",
+            "    data = []\n",
+            "    for p in paths:\n",
+            "        rows = load_rows(p)\n",
+            "        data.append(transform(rows))\n",
+            "    return data\n",
+            "\n",
+            "def shadowed(parse_row):\n",
+            "    value = parse_row(1)\n",
+            "    total = value + len(str(value))\n",
+            "    return total\n",
+        ),
+    );
+    write(
+        "pkg/uni.py",
+        concat!(
+            "def greet(name):\n",
+            "    msg = \"h\u{e9}llo \u{2014} \u{fc}n\u{ef}code\"\n",
+            "    label = msg + name\n",
+            "    if label:\n",
+            "        return label\n",
+            "    return msg\n",
+        ),
+    );
+    let cfg = explore::explore_cfg();
+    let analysis = run::analyze(dir.path(), &cfg);
+    let n = analysis.scanned.symbols.len();
+    let docs = explore::scan_file_docs(dir.path());
+    let sources = explore::scan_sources(dir.path(), &analysis.scanned.symbols);
+    let state = explore::state_from(
+        "viewer",
+        cfg,
+        analysis,
+        synthetic_embeddings(n, 24),
+        docs,
+        sources,
+        false,
+        None,
+    );
+    (dir, state)
+}
+
+/// The toks whose sliced text equals `needle`, as (class, link) pairs.
+fn toks_for<'a>(v: &'a serde_json::Value, needle: &str) -> Vec<(&'a str, &'a serde_json::Value)> {
+    let text = v["text"].as_str().unwrap();
+    v["toks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| {
+            utf16_slice(text, t[0].as_u64().unwrap(), t[1].as_u64().unwrap()) == needle
+        })
+        .map(|t| (t[2].as_str().unwrap(), &t[3]))
+        .collect()
+}
+
+#[test]
+fn source_endpoint_serves_full_text_with_sane_highlight_classes() {
+    let (_dir, state) = viewer_tree_state();
+    let id = sym_id(&state, "load_rows");
+    let resp = explore::respond(&state, &format!("/api/source?id={id}"));
+    assert_eq!(resp.status, 200);
+    let v = json(&resp);
+    assert_eq!(v["id"], id);
+    assert_eq!(v["file"], "pkg/core.py");
+    let text = v["text"].as_str().unwrap();
+    assert!(text.starts_with("def load_rows(path):"), "full source, from the def line");
+    assert!(text.ends_with("return rows\n") || text.ends_with("return rows"), "complete body");
+    // toks: sorted, non-overlapping, classes from the fixed set
+    let toks = v["toks"].as_array().unwrap();
+    let mut prev_end = 0u64;
+    for t in toks {
+        let (s, e) = (t[0].as_u64().unwrap(), t[1].as_u64().unwrap());
+        assert!(s >= prev_end, "toks sorted and non-overlapping");
+        assert!(e > s && e <= text.encode_utf16().count() as u64, "tok in bounds");
+        prev_end = e;
+        let cls = t[2].as_str().unwrap();
+        assert!(
+            ["kw", "str", "com", "num", "def", "call", ""].contains(&cls),
+            "known class: {cls}"
+        );
+        // an empty class is only ever a link-only token
+        assert!(!cls.is_empty() || !t[3].is_null());
+    }
+    // the def keyword, the definition name, a comment, a string
+    assert!(toks_for(&v, "def").iter().any(|(c, _)| *c == "kw"));
+    assert!(toks_for(&v, "load_rows").iter().any(|(c, _)| *c == "def"));
+    assert!(toks_for(&v, "# read the file").iter().any(|(c, _)| *c == "com"));
+    assert!(toks_for(&v, "','").iter().any(|(c, _)| *c == "str") || {
+        // the ',' literal lives in parse_row, not load_rows — check there
+        let pid = sym_id(&state, "parse_row");
+        let pv = json(&explore::respond(&state, &format!("/api/source?id={pid}")));
+        toks_for(&pv, "','").iter().any(|(c, _)| *c == "str")
+    });
+}
+
+#[test]
+fn identifier_links_resolve_same_file_and_import_pinned_only_when_unambiguous() {
+    let (_dir, state) = viewer_tree_state();
+    let parse_row = sym_id(&state, "parse_row") as u64;
+    let load_rows = sym_id(&state, "load_rows") as u64;
+
+    // same-file unique call: load_rows's `parse_row(line)` links
+    let v = json(&explore::respond(&state, &format!("/api/source?id={load_rows}")));
+    let pr = toks_for(&v, "parse_row");
+    assert_eq!(pr.len(), 1, "one parse_row occurrence in load_rows");
+    assert_eq!(pr[0].0, "call");
+    assert_eq!(pr[0].1.as_u64(), Some(parse_row), "same-file unique name links");
+    // ambient builtins never link, even as the only corpus match
+    for ambient in ["open", "append"] {
+        for (_, link) in toks_for(&v, ambient) {
+            assert!(link.is_null(), "{ambient} is ambient — plain text");
+        }
+    }
+
+    // cross-file: import-pinned resolves; a duplicate corpus name does not
+    let run_all = sym_id(&state, "run_all");
+    let v = json(&explore::respond(&state, &format!("/api/source?id={run_all}")));
+    let lr = toks_for(&v, "load_rows");
+    assert_eq!(lr.len(), 1);
+    assert_eq!(lr[0].1.as_u64(), Some(load_rows), "from-import pins the module");
+    let tf = toks_for(&v, "transform");
+    assert_eq!(tf.len(), 1);
+    assert!(tf[0].1.is_null(), "two corpus `transform`s — ambiguous, plain text");
+
+    // locals shadow: `parse_row` the PARAMETER never links to the function
+    let shadowed = sym_id(&state, "shadowed");
+    let v = json(&explore::respond(&state, &format!("/api/source?id={shadowed}")));
+    for (_, link) in toks_for(&v, "parse_row") {
+        assert!(link.is_null(), "a local binding shadows the corpus name");
+    }
+}
+
+#[test]
+fn source_offsets_are_utf16_code_units() {
+    let (_dir, state) = viewer_tree_state();
+    let greet = sym_id(&state, "greet");
+    let v = json(&explore::respond(&state, &format!("/api/source?id={greet}")));
+    let lit = format!("\"h\u{e9}llo \u{2014} \u{fc}n\u{ef}code\"");
+    assert!(
+        !toks_for(&v, &lit).is_empty(),
+        "the non-ASCII literal slices back out exactly under UTF-16 offsets"
+    );
+    // tokens AFTER the literal still line up (locals like `label` are
+    // deliberately un-tokened — keywords prove the offsets)
+    let returns = toks_for(&v, "return");
+    assert_eq!(returns.len(), 2, "both return keywords align");
+    assert!(returns.iter().all(|(c, _)| *c == "kw"));
+    assert!(toks_for(&v, "if").iter().any(|(c, _)| *c == "kw"));
+}
+
+#[test]
+fn source_rejects_bad_ids() {
+    let state = fixture_state();
+    assert_eq!(explore::respond(&state, "/api/source").status, 400);
+    assert_eq!(explore::respond(&state, "/api/source?id=abc").status, 400);
+    assert_eq!(explore::respond(&state, "/api/source?id=999999").status, 404);
+}
+
+#[test]
+fn compare_endpoint_serves_both_sides_and_deterministic_regions() {
+    let state = fixture_state();
+    let symbols = &state.analysis.scanned.symbols;
+    let orig = symbols
+        .iter()
+        .position(|s| s.sym.file == "clone_original.py")
+        .expect("planted fixture present");
+    let clone = symbols
+        .iter()
+        .position(|s| s.sym.file == "clone_renamed.py")
+        .expect("planted fixture present");
+    let resp = explore::respond(&state, &format!("/api/compare?id={orig}&b={clone}"));
+    assert_eq!(resp.status, 200);
+    let v = json(&resp);
+    assert_eq!(v["a"]["id"], orig);
+    assert_eq!(v["b"]["id"], clone);
+    for side in ["a", "b"] {
+        assert!(v[side]["text"].as_str().unwrap().starts_with("def"));
+        assert!(v[side]["toks"].is_array());
+    }
+    let regions = v["regions"].as_array().unwrap();
+    assert!(!regions.is_empty(), "a planted clone pair aligns");
+    let (la, lb) = (
+        v["a"]["text"].as_str().unwrap().encode_utf16().count() as u64,
+        v["b"]["text"].as_str().unwrap().encode_utf16().count() as u64,
+    );
+    let mut prev_a = 0u64;
+    for r in regions {
+        let tier = r["tier"].as_u64().unwrap();
+        assert!(tier == 1 || tier == 2, "tiers are 1 (exact) or 2 (near)");
+        let (a0, a1) = (r["a"][0].as_u64().unwrap(), r["a"][1].as_u64().unwrap());
+        let (b0, b1) = (r["b"][0].as_u64().unwrap(), r["b"][1].as_u64().unwrap());
+        assert!(a0 < a1 && a1 <= la, "A span in bounds");
+        assert!(b0 < b1 && b1 <= lb, "B span in bounds");
+        assert!(a0 >= prev_a, "regions ordered and non-overlapping on A");
+        prev_a = a1;
+    }
+    // no numeric similarity anywhere in the payload (the panes stay clean)
+    let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    let mut sorted = keys.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, ["a", "b", "regions"]);
+}
+
+#[test]
+fn compare_defaults_to_the_embedding_ranked_neighbor() {
+    let state = fixture_state();
+    let resp = explore::respond(&state, "/api/compare?id=0");
+    assert_eq!(resp.status, 200);
+    let v = json(&resp);
+    assert_eq!(v["a"]["id"], 0);
+    let b = v["b"]["id"].as_u64().unwrap() as usize;
+    assert_ne!(b, 0, "never compares a symbol to itself");
+    // symbol 0 is product code, so the default neighbor is too
+    assert!(!state.analysis.scanned.symbols[0].is_test);
+    assert!(!state.analysis.scanned.symbols[b].is_test);
+}
+
+#[test]
+fn compare_rejects_bad_ids() {
+    let state = fixture_state();
+    assert_eq!(explore::respond(&state, "/api/compare").status, 400);
+    assert_eq!(explore::respond(&state, "/api/compare?id=0&b=abc").status, 400);
+    assert_eq!(explore::respond(&state, "/api/compare?id=0&b=999999").status, 404);
+}
+
+#[test]
+fn source_and_compare_are_byte_identical_across_two_state_builds() {
+    for path in ["/api/source?id=0", "/api/compare?id=0", "/api/compare?id=0&b=1"] {
+        let a = explore::respond(&fixture_state(), path);
+        let b = explore::respond(&fixture_state(), path);
+        assert_eq!(a.body, b.body, "{path} must be deterministic");
+    }
+}
+
 // ── /api/find's ranking layer (model-free: the query vector is an input) ──
 
 #[test]
@@ -749,6 +1051,16 @@ fn explore_server_end_to_end() {
     let card: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(card["id"], 0);
     assert!(card["callers"].is_array());
+
+    let (status, body) = http_get(port, "/api/source?id=0");
+    assert_eq!(status, 200);
+    let source: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(source["text"].as_str().unwrap().contains("def"));
+
+    let (status, body) = http_get(port, "/api/compare?id=0");
+    assert_eq!(status, 200);
+    let cmp: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(cmp["regions"].is_array());
 
     let (status, body) = http_get(port, "/api/anchor?id=0");
     assert_eq!(status, 200);

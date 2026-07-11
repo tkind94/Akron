@@ -266,20 +266,23 @@ fn ambiguous(symbols: &[SymbolPrint], mut ids: Vec<usize>, query: &str) -> anyho
 
 /// qname's final `.`-segment (mirrors `callrel::base_name` /
 /// `family::base_name` — each module keeps its own copy rather than a shared
-/// export, per this codebase's established precedent).
-fn base_name(qname: &str) -> &str {
+/// export, per this codebase's established precedent). `pub(crate)` since
+/// TKI-61: the explore viewer's identifier links must apply the *same*
+/// resolution discipline as this card's callers, so the gates are shared
+/// rather than re-derived (a second copy of `PY_AMBIENT_NAMES` would drift).
+pub(crate) fn base_name(qname: &str) -> &str {
     qname.rsplit('.').next().unwrap_or(qname)
 }
 
 /// qname's class segment when qname is that class's `__init__` (mirrors
 /// `callrel::class_of_init`).
-fn class_of_init(qname: &str) -> Option<&str> {
+pub(crate) fn class_of_init(qname: &str) -> Option<&str> {
     let (class, method) = qname.rsplit_once('.')?;
     (method == "__init__").then_some(class)
 }
 
 /// A file's dotted module path components (mirrors `callrel::module_components`).
-fn module_components(file: &str) -> Vec<&str> {
+pub(crate) fn module_components(file: &str) -> Vec<&str> {
     let stem = file.strip_suffix(".py").unwrap_or(file);
     let mut comps: Vec<&str> = stem.split('/').collect();
     if comps.last() == Some(&"__init__") {
@@ -291,7 +294,7 @@ fn module_components(file: &str) -> Vec<&str> {
 /// Whether `file` provides the dotted module path `m` (mirrors
 /// `callrel::index_module_suffixes`'s lookup, recomputed directly here since
 /// that index isn't part of `CallGraph`'s public surface).
-fn module_matches(file: &str, m: &str) -> bool {
+pub(crate) fn module_matches(file: &str, m: &str) -> bool {
     let comps = module_components(file);
     (0..comps.len()).any(|start| comps[start..].join(".") == m)
 }
@@ -315,7 +318,7 @@ fn call_targets(callee: &SymbolPrint, c: &Call) -> bool {
 /// How many corpus symbols a bare name `n` could mean — a free function/method
 /// named `n`, or a class `n` via its `__init__`. The same worst-case set
 /// `call_targets`'s `None`-module fallback matches against.
-fn base_name_counts(symbols: &[SymbolPrint]) -> HashMap<&str, u32> {
+pub(crate) fn base_name_counts(symbols: &[SymbolPrint]) -> HashMap<&str, u32> {
     let mut counts: HashMap<&str, u32> = HashMap::new();
     for s in symbols {
         *counts.entry(base_name(&s.sym.qname)).or_insert(0) += 1;
@@ -360,7 +363,7 @@ const PY_AMBIENT_NAMES: &[&str] = &[
     "compile",
 ];
 
-fn is_ambient_name(name: &str) -> bool {
+pub(crate) fn is_ambient_name(name: &str) -> bool {
     PY_AMBIENT_NAMES.contains(&name)
 }
 
@@ -370,7 +373,7 @@ fn is_ambient_name(name: &str) -> bool {
 /// class in httpx's `_exceptions.py` thirteen fake callers (TKI-54, found
 /// by the guide panel — the real signal, `raise InvalidURL(…)`, flows
 /// through the class-name constructor path and still counts).
-fn is_dunder(name: &str) -> bool {
+pub(crate) fn is_dunder(name: &str) -> bool {
     name.starts_with("__") && name.ends_with("__")
 }
 

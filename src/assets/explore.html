@@ -148,7 +148,10 @@ body {
 .chip.branch .glyph { color: var(--accent); font-weight: 700; }
 
 /* ── main ── */
-main { display: grid; grid-template-columns: 1fr 340px; min-height: 0; }
+main { display: grid; grid-template-columns: 1fr 340px; min-height: 0; position: relative; }
+/* the viewer needs room for code; the landing (guide) state keeps the
+   original 340px so the map's first impression is untouched */
+main.hasSel { grid-template-columns: 1fr minmax(420px, 46%); }
 #stage { position: relative; min-width: 0; }
 #map { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 
@@ -211,6 +214,70 @@ main { display: grid; grid-template-columns: 1fr 340px; min-height: 0; }
 }
 #panel .none { color: var(--dim); }
 #panel .shared { color: var(--dim); word-break: break-all; margin-top: 2px; }
+
+/* ── code viewer (TKI-61) ── */
+#panel .actions { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+.chipbtn {
+  background: var(--bg);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  font: inherit;
+  padding: 2px 9px;
+  cursor: pointer;
+}
+.chipbtn:hover { border-color: var(--accent); color: var(--accent); }
+pre.code {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  overflow: auto;
+  /* code first, but the card's facts stay one scroll away on long bodies */
+  max-height: 64vh;
+  tab-size: 4;
+  line-height: 1.5;
+}
+/* token classes: keyword / string / comment / number / def-name / call */
+.tok-kw  { color: #c78bb1; }
+.tok-str { color: #b3ae6b; }
+.tok-com { color: var(--dim); font-style: italic; }
+.tok-num { color: #6fc3c9; }
+.tok-def { color: #dba25e; font-weight: 700; }
+.tok-call { color: #7fb3d9; }
+@media (prefers-color-scheme: light) {
+  .tok-kw  { color: #8f4f7f; }
+  .tok-str { color: #6f6b2a; }
+  .tok-num { color: #256e74; }
+  .tok-def { color: #96601c; }
+  .tok-call { color: #2670c2; }
+}
+/* identifiers that resolve to a symbol in the index: one click from source */
+.lnk { text-decoration: underline; text-decoration-color: var(--dim); text-underline-offset: 2px; cursor: pointer; }
+.lnk:hover { color: var(--accent); text-decoration-color: var(--accent); }
+
+/* ── compare: side-by-side over the main area (esc closes) ── */
+#cmp { position: absolute; inset: 0; z-index: 20; background: var(--panel); display: grid; grid-template-rows: auto 1fr; }
+#cmp[hidden] { display: none; }
+#cmpbar {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+  overflow: hidden;
+}
+#cmpbar .legend { color: var(--dim); margin-left: auto; }
+#cmppanes { display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
+.cmppane { position: relative; overflow: auto; padding: 8px 10px; }
+.cmppane:first-child { border-right: 1px solid var(--line); }
+.cmppane .panehead { color: var(--dim); margin-bottom: 6px; word-break: break-all; }
+.cmppane .panehead b { color: var(--ink); }
+.cmppane pre { tab-size: 4; line-height: 1.5; }
+.reg { border-radius: 2px; }
+.reg.hot { outline: 1px solid var(--accent); }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
@@ -252,6 +319,14 @@ footer {
 <main>
   <div id="stage"><canvas id="map"></canvas></div>
   <aside id="panel"><div class="empty" id="card">no selection — click a symbol</div></aside>
+  <div id="cmp" hidden>
+    <div id="cmpbar">
+      <button class="chipbtn" id="cmpclose">✕ close</button>
+      <span id="cmptitle"></span>
+      <span class="legend">solid — identical after whitespace collapse · dotted — aligned, differs · hover pairs</span>
+    </div>
+    <div id="cmppanes"></div>
+  </div>
 </main>
 <footer><span id="readout"></span></footer>
 <script>
@@ -274,7 +349,7 @@ const AXES = [
   {id:"pca4", label:"PCA-5"}, {id:"pca5", label:"PCA-6"},
   {id:"pca6", label:"PCA-7"}, {id:"pca7", label:"PCA-8"},
 ];
-const DEFAULT_HINT = "drag pan · wheel zoom · click select · dblclick drill in · esc drill up";
+const DEFAULT_HINT = "drag pan · wheel zoom · click select · dblclick drill in · esc back / drill up";
 
 let S = [];                 // /api/symbols
 let META = {pca_var: [], labels: {prod: [], full: []}}; // /api/meta
@@ -290,6 +365,8 @@ let hitSet = new Set();
 let anchor = {id:-1, a:null, b:null};
 let drill = null;           // /api/sublayout payload + set/slot indexes; null = whole repo
 let visited = new Set();    // ids selected this session (guidance: "next")
+let navStack = [];          // back-history of selections (viewer loop, TKI-61)
+let cmp = null;             // /api/compare payload while the overlay is open
 let labelBoxes = [];        // dir labels placed this frame, for dblclick drill
 let mode = "map";           // map | anchor | time | axes
 let axisX = "map_x", axisY = "map_y";
@@ -798,12 +875,20 @@ function nearest(mx, my) {
 }
 
 /* ── selection: the anchor ── */
-async function select(id, center) {
+async function select(id, center, fromBack) {
   // selecting outside the drill (search hit, card reference) exits to the
   // whole-repo map — the breadcrumb resets, so "where am I" stays obvious
   if (drill && !drill.set.has(id)) await drillTo("");
+  // back-history (TKI-61): every selection is retraceable; a pop itself
+  // never re-pushes, so esc/← walks straight back
+  if (!fromBack && selected >= 0 && selected !== id) {
+    navStack.push(selected);
+    if (navStack.length > 64) navStack.shift();
+  }
+  closeCompare();
   selected = id;
   visited.add(id);
+  document.querySelector("main").classList.add("hasSel");
   loadCard(id);
   syncViews();
   if (isAnchorAxis(axisX) || isAnchorAxis(axisY)) {
@@ -894,9 +979,43 @@ function listSection(title, titleDim, build) {
   build(sec);
   return sec;
 }
+/* ── code rendering (TKI-61): the server ships text + [start, end, class,
+   link] tokens in UTF-16 offsets; the page slices strings directly. ── */
+// Emit text[from..to) into `el`: plain text nodes between tokens, spans for
+// tokens. `links` wires resolved identifiers to the navigation loop.
+function emitToks(el, text, toks, from, to, links) {
+  let pos = from;
+  for (const t of toks) {
+    const s = Math.max(t[0], from), e = Math.min(t[1], to);
+    if (e <= s) continue;
+    if (s > pos) el.appendChild(document.createTextNode(text.slice(pos, s)));
+    const sp = document.createElement("span");
+    if (t[2]) sp.className = "tok-" + t[2];
+    sp.textContent = text.slice(s, e);
+    if (links && t[3] !== null && t[3] !== undefined) {
+      sp.classList.add("lnk");
+      sp.title = `${S[t[3]].qname} — ${S[t[3]].file}:${S[t[3]].line}`;
+      sp.addEventListener("click", () => select(t[3], true));
+    }
+    el.appendChild(sp);
+    pos = e;
+  }
+  if (pos < to) el.appendChild(document.createTextNode(text.slice(pos, to)));
+}
+function renderCode(src, links) {
+  const pre = document.createElement("pre");
+  pre.className = "code";
+  emitToks(pre, src.text, src.toks, 0, src.text.length, links);
+  return pre;
+}
+
 async function loadCard(id) {
-  const r = await fetch(`/api/explain?id=${id}`);
+  const [r, rs] = await Promise.all([
+    fetch(`/api/explain?id=${id}`),
+    fetch(`/api/source?id=${id}`),
+  ]);
   const c = await r.json();
+  const src = rs.ok ? await rs.json() : null;
   if (c.id !== selected) return; // stale response
   const card = $("card");
   card.className = "";
@@ -951,6 +1070,29 @@ async function loadCard(id) {
     meta.appendChild(el);
   });
   card.appendChild(meta);
+
+  // actions: retrace jumps, open the side-by-side (TKI-61)
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  if (navStack.length) {
+    const back = document.createElement("button");
+    back.className = "chipbtn";
+    back.textContent = "← back";
+    back.title = `back to ${S[navStack[navStack.length - 1]].qname}`;
+    back.addEventListener("click", popBack);
+    actions.appendChild(back);
+  }
+  const cmpBtn = document.createElement("button");
+  cmpBtn.className = "chipbtn";
+  cmpBtn.textContent = "compare";
+  cmpBtn.title = "side-by-side with the nearest embedding-ranked symbol";
+  cmpBtn.addEventListener("click", () => openCompare(id));
+  actions.appendChild(cmpBtn);
+  card.appendChild(actions);
+
+  // the code itself — the viewer is the panel's primary content;
+  // resolved identifiers are clickable (every fact one click from source)
+  if (src) card.appendChild(renderCode(src, true));
 
   // branch-new symbols: the closest already-existing code (the model ranks;
   // the numbers are Channel A/B's)
@@ -1060,6 +1202,119 @@ async function loadCard(id) {
       sec.appendChild(ul);
     }));
   }
+}
+
+/* ── back-history (TKI-61): esc or the ← chip retraces jumps ── */
+function popBack() {
+  if (!navStack.length) return;
+  select(navStack.pop(), true, true);
+}
+
+/* ── compare (TKI-61): synchronized side-by-side, esc closes ──
+   Region pairs come from /api/compare (deterministic tree alignment);
+   pair index = color. NO similarity number appears on the panes — the
+   card already carries the deterministic A/B cosines. */
+function regColor(i, alpha) { return PALETTE[i % PALETTE.length] + alpha; }
+
+function buildPane(side, regions, key) {
+  const pane = document.createElement("div");
+  pane.className = "cmppane";
+  const head = document.createElement("div");
+  head.className = "panehead";
+  const b = document.createElement("b");
+  b.textContent = side.qname;
+  head.append(b, document.createTextNode(` · ${side.file}:${side.line}`));
+  pane.appendChild(head);
+  const pre = document.createElement("pre");
+  // regions arrive sorted by the A side; the construction is monotonic on
+  // both sides, but render in this side's own span order regardless
+  const order = regions.map((r, i) => [r[key][0], i]).sort((x, y) => x[0] - y[0]);
+  let pos = 0;
+  for (const [, i] of order) {
+    const r = regions[i];
+    const [s, e] = r[key];
+    if (s > pos) emitToks(pre, side.text, side.toks, pos, s, false);
+    const sp = document.createElement("span");
+    sp.className = "reg";
+    sp.dataset.p = i;
+    sp.style.background = regColor(i, "2e");
+    if (r.tier === 2) sp.style.borderBottom = `1px dotted ${PALETTE[i % PALETTE.length]}`;
+    sp.title = r.tier === 1 ? "identical after whitespace collapse"
+                            : "aligned — differs";
+    emitToks(sp, side.text, side.toks, s, e, false);
+    pre.appendChild(sp);
+    pos = e;
+  }
+  emitToks(pre, side.text, side.toks, pos, side.text.length, false);
+  pane.appendChild(pre);
+  return pane;
+}
+
+// scroll-sync on aligned regions: keep the twin of the region nearest the
+// scrolled pane's upper third at the same viewport offset
+let syncing = false;
+function syncScroll(from, to) {
+  if (syncing) return;
+  const anchorY = from.scrollTop + from.clientHeight * 0.3;
+  let best = null, bestD = Infinity;
+  for (const sp of from.querySelectorAll(".reg")) {
+    const d = Math.abs(sp.offsetTop - anchorY);
+    if (d < bestD) { bestD = d; best = sp; }
+  }
+  if (!best) return;
+  const twin = to.querySelector(`.reg[data-p="${best.dataset.p}"]`);
+  if (!twin) return;
+  syncing = true;
+  to.scrollTop = twin.offsetTop - (best.offsetTop - from.scrollTop);
+  requestAnimationFrame(() => { syncing = false; });
+}
+
+async function openCompare(id) {
+  let j;
+  try {
+    const r = await fetch(`/api/compare?id=${id}`);
+    if (!r.ok) throw new Error((await r.json()).error || `HTTP ${r.status}`);
+    j = await r.json();
+  } catch (e) {
+    $("readout").textContent =
+      `compare failed — ${e instanceof TypeError ? "server unreachable" : e.message}`;
+    return;
+  }
+  if (id !== selected) return; // stale response
+  cmp = j;
+  $("cmptitle").textContent = `${j.a.qname} ⟷ ${j.b.qname}`;
+  const panes = $("cmppanes");
+  panes.textContent = "";
+  const pa = buildPane(j.a, j.regions, "a");
+  const pb = buildPane(j.b, j.regions, "b");
+  panes.append(pa, pb);
+  pa.addEventListener("scroll", () => syncScroll(pa, pb));
+  pb.addEventListener("scroll", () => syncScroll(pb, pa));
+  // hovering a region highlights its twin
+  let hot = -1;
+  panes.addEventListener("mousemove", e => {
+    const sp = e.target.closest(".reg");
+    const p = sp ? +sp.dataset.p : -1;
+    if (p === hot) return;
+    for (const el of panes.querySelectorAll(".reg.hot")) {
+      el.classList.remove("hot");
+      el.style.background = regColor(+el.dataset.p, "2e");
+    }
+    hot = p;
+    if (p >= 0) {
+      for (const el of panes.querySelectorAll(`.reg[data-p="${p}"]`)) {
+        el.classList.add("hot");
+        el.style.background = regColor(p, "59");
+      }
+    }
+  });
+  $("cmp").hidden = false;
+}
+function closeCompare() {
+  if (!cmp) return;
+  cmp = null;
+  $("cmp").hidden = true;
+  $("cmppanes").textContent = "";
 }
 
 /* ── search ── */
@@ -1219,6 +1474,7 @@ function docFact() {
 }
 
 function renderGuide() {
+  document.querySelector("main").classList.remove("hasSel");
   const card = $("card");
   card.className = "";
   card.textContent = "";
@@ -1423,8 +1679,11 @@ function initControls() {
   document.addEventListener("keydown", e => {
     if (e.key !== "Escape" || e.target === $("search")) return;
     if (!$("hitlist").hidden) { $("hitlist").hidden = true; return; }
+    if (cmp) { closeCompare(); return; }
+    if (navStack.length) { popBack(); return; }
     drillUp();
   });
+  $("cmpclose").addEventListener("click", closeCompare);
   canvas.addEventListener("wheel", e => {
     e.preventDefault();
     const f = Math.exp(-e.deltaY * 0.0015);

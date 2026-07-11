@@ -66,6 +66,21 @@ impl ImportTable {
     fn get(&self, name: &str) -> Option<&Binding> {
         self.binds.get(name)
     }
+    /// `from m import orig [as name]` binding for `name`: `(orig, module)`.
+    /// TKI-61 viewer: the read-only mirror of `Builder::resolve_bare`, so the
+    /// explore page's identifier links resolve imports exactly the way the
+    /// call records the engine already trusts do.
+    pub fn symbol_import(&self, name: &str) -> Option<(&str, &ModuleRef)> {
+        self.get(name)
+            .and_then(|b| b.symbol.as_deref().map(|s| (s, &b.module)))
+    }
+    /// `import m [as name]` / `from . import name` binding: `name` is itself
+    /// a module. The read-only mirror of `Builder::resolve_attr`'s object
+    /// lookup (TKI-61 viewer, same reasoning as `symbol_import`).
+    pub fn module_import(&self, name: &str) -> Option<&ModuleRef> {
+        self.get(name)
+            .and_then(|b| b.symbol.is_none().then_some(&b.module))
+    }
 }
 
 /// Collect a file's module-level import bindings. `rel_path` is the file's
@@ -244,7 +259,11 @@ fn field_text(node: Node, field: &str, source: &[u8]) -> Option<String> {
 
 // ── locals: parameters + assignment/for/with-as/walrus/nested-def targets ──
 
-fn collect_locals(func: Node, source: &[u8]) -> HashMap<String, u32> {
+/// `pub` since TKI-61: the explore viewer skips link resolution for
+/// identifiers that are locals (Python's own shadowing — a parameter named
+/// `helper` must not link to a corpus function `helper`), using the exact
+/// binding collection Channel A's alpha-rename already trusts.
+pub fn collect_locals(func: Node, source: &[u8]) -> HashMap<String, u32> {
     let mut locals = HashMap::new();
     if let Some(params) = func.child_by_field_name("parameters") {
         param_names(params, source, &mut locals);
