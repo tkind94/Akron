@@ -234,6 +234,8 @@ pre.code {
   border: 1px solid var(--line);
   border-radius: 3px;
   overflow: auto;
+  /* code first, but the card's facts stay one scroll away on long bodies */
+  max-height: 64vh;
   tab-size: 4;
   line-height: 1.5;
 }
