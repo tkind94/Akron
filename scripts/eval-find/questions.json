@@ -1,0 +1,104 @@
+{
+  "schema": "akron.eval-find/v1",
+  "note": "Ground truth established by reading the corpus source directly (not from memory) — see TKI-64 audit. `expected` symbols are matched against a hit's `qname` by substring (case-sensitive) so either the bare method name or Class.method form counts as a match. `k` is the P@5 cutoff (top 5 hits scored).",
+  "questions": [
+    {
+      "id": "httpx-01",
+      "corpus": "httpx-full",
+      "query": "where do we retry failed requests",
+      "expected": ["HTTPTransport.__init__", "AsyncHTTPTransport.__init__", "HTTPTransport.handle_request", "AsyncHTTPTransport.handle_async_request"],
+      "note": "httpx delegates retries to httpcore's connection pool via the `retries=` kwarg threaded through HTTPTransport/AsyncHTTPTransport __init__ and handle_request (_transports/default.py)."
+    },
+    {
+      "id": "httpx-02",
+      "corpus": "httpx-full",
+      "query": "how are cookies persisted across requests",
+      "expected": ["Cookies.extract_cookies", "Cookies.set_cookie_header", "Cookies.update", "BaseClient.cookies"],
+      "note": "_models.py Cookies class: extract_cookies reads Set-Cookie from a response into the jar, set_cookie_header writes the jar onto an outgoing request."
+    },
+    {
+      "id": "httpx-03",
+      "corpus": "httpx-full",
+      "query": "where is redirect loop protection / max redirects enforced",
+      "expected": ["Client._send_handling_redirects", "AsyncClient._send_handling_redirects", "TooManyRedirects"],
+      "note": "_client.py _send_handling_redirects loops while response.has_redirect_location, raising TooManyRedirects once history exceeds max_redirects."
+    },
+    {
+      "id": "httpx-04",
+      "corpus": "httpx-full",
+      "query": "how does httpx do HTTP digest authentication",
+      "expected": ["DigestAuth.auth_flow", "DigestAuth._build_auth_header", "DigestAuth._parse_challenge"],
+      "note": "_auth.py DigestAuth implements RFC 7616 digest auth."
+    },
+    {
+      "id": "httpx-05",
+      "corpus": "httpx-full",
+      "query": "where are default connection and read timeouts configured",
+      "expected": ["Timeout.__init__", "Timeout.as_dict", "Timeout.__repr__", "BaseClient.timeout", "BaseClient._set_timeout", "DEFAULT_TIMEOUT_CONFIG"],
+      "note": "_config.py Timeout class (+ module-level DEFAULT_TIMEOUT_CONFIG = Timeout(timeout=5.0)); _client.py BaseClient.timeout property / _set_timeout apply it per-request. Broadened after first eval run surfaced Timeout.as_dict/__repr__/BaseClient.timeout as equally correct answers the original narrower list under-credited."
+    },
+    {
+      "id": "httpx-06",
+      "corpus": "httpx-full",
+      "query": "how does httpx encode multipart form data for file uploads",
+      "expected": ["encode_multipart_data", "MultipartStream.__init__", "MultipartStream.iter_chunks", "FileField.render", "FileField.render_data", "FileField.render_headers", "FileField.__init__", "DataField.render"],
+      "note": "_multipart.py: encode_multipart_data is the entry point; MultipartStream/FileField/DataField build the multipart/form-data body. Broadened after first eval run surfaced FileField.render/__init__ and encode_multipart_data as equally correct answers the original narrower list under-credited."
+    },
+    {
+      "id": "httpx-07",
+      "corpus": "httpx-full",
+      "query": "where does httpx decide the request method and headers to use after a redirect",
+      "expected": ["Client._build_redirect_request", "Client._redirect_method", "Client._redirect_headers", "Client._redirect_url"],
+      "note": "_client.py: _build_redirect_request composes the follow-up request; _redirect_method downgrades POST->GET on 303 etc."
+    },
+    {
+      "id": "scrapy-01",
+      "corpus": "scrapy-full",
+      "query": "where do we retry failed requests",
+      "expected": ["RetryMiddleware._retry", "RetryMiddleware.process_response", "RetryMiddleware.process_exception", "get_retry_request"],
+      "note": "downloadermiddlewares/retry.py RetryMiddleware retries on configured HTTP codes / exceptions, up to RETRY_TIMES."
+    },
+    {
+      "id": "scrapy-02",
+      "corpus": "scrapy-full",
+      "query": "how are cookies persisted across requests to the same spider",
+      "expected": ["CookiesMiddleware.process_request", "CookiesMiddleware.process_response", "CookiesMiddleware._process_cookies", "CookiesMiddleware._get_request_cookies"],
+      "note": "downloadermiddlewares/cookies.py CookiesMiddleware keeps a per-jobid CookieJar (meta['cookiejar']) across the crawl."
+    },
+    {
+      "id": "scrapy-03",
+      "corpus": "scrapy-full",
+      "query": "where is redirect loop protection / max redirect count enforced",
+      "expected": ["BaseRedirectMiddleware._redirect", "RedirectMiddleware.process_response"],
+      "note": "downloadermiddlewares/redirect.py _redirect tracks redirect_times/redirect_ttl in request.meta and raises IgnoreRequest('max redirections reached') once exceeded."
+    },
+    {
+      "id": "scrapy-04",
+      "corpus": "scrapy-full",
+      "query": "how does scrapy avoid crawling the same URL twice",
+      "expected": ["RFPDupeFilter.request_seen", "RFPDupeFilter.request_fingerprint", "BaseDupeFilter.request_seen"],
+      "note": "dupefilters.py RFPDupeFilter fingerprints each Request and drops repeats."
+    },
+    {
+      "id": "scrapy-05",
+      "corpus": "scrapy-full",
+      "query": "where does scrapy check robots.txt before fetching a URL",
+      "expected": ["RobotsTxtMiddleware.process_request", "RobotsTxtMiddleware._parse_robots", "RobotsTxtMiddleware.robot_parser", "ProtegoRobotParser.allowed", "RerpRobotParser.allowed"],
+      "note": "downloadermiddlewares/robotstxt.py RobotsTxtMiddleware defers requests until the robots.txt for the netloc is parsed, then calls RobotParser.allowed."
+    },
+    {
+      "id": "scrapy-06",
+      "corpus": "scrapy-full",
+      "query": "how does scrapy adaptively throttle the download delay based on response latency",
+      "expected": ["AutoThrottle._adjust_delay", "AutoThrottle._response_downloaded", "AutoThrottle._min_delay", "AutoThrottle._max_delay"],
+      "note": "extensions/throttle.py AutoThrottle adjusts a per-slot delay toward a target concurrency using measured latency."
+    },
+    {
+      "id": "scrapy-07",
+      "corpus": "scrapy-full",
+      "query": "where are pending requests queued and prioritized between the memory and disk queues",
+      "expected": ["Scheduler.enqueue_request", "Scheduler.next_request", "Scheduler._mqpush", "Scheduler._dqpush", "ScrapyPriorityQueue.push", "ScrapyPriorityQueue.pop", "ScrapyPriorityQueue.peek", "DownloaderAwarePriorityQueue.push", "DownloaderAwarePriorityQueue.pop"],
+      "note": "core/scheduler.py Scheduler splits requests between an in-memory priority queue and an optional on-disk queue (jobdir), backed by pqueues.py's ScrapyPriorityQueue/DownloaderAwarePriorityQueue. Broadened after first eval run surfaced the pqueues.py implementations as equally correct answers."
+    }
+  ]
+}
