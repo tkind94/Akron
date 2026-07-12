@@ -215,9 +215,17 @@ labeled island open it and a committed far zoom-out climb back; labels
 and path segments drill regardless.
 **Guidance:** with nothing selected the panel lists factual starting
 points for the current scope — largest dirs/files, most-called symbols,
-last touched — each row a click; a selected card ends with the nearest
-not-yet-visited layout neighbor. Counts and dates only; the map offers
-places to start, it never judges them.
+last touched — each row a click; a selected card ends with its 5 nearest
+layout neighbors, closest first, visited ones marked rather than dropped
+from the list. Counts and dates only; the map offers places to start, it
+never judges them.
+**Panel → map hover linking (TKI-70):** every panel row naming a symbol —
+callers, callees, clones, role twins, nearest-existing, nearest layout
+neighbors, most-called, last-touched — highlights that symbol's dot on
+the map while the row is hovered (a dashed halo with crosshair ticks,
+distinct from the selection/search/branch rings). A row whose symbol
+isn't drawn in the current scope says so on hover instead of highlighting
+anything; it never auto-pans or auto-drills.
 
 ## CLI-surface principles (binding)
 

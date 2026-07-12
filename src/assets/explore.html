@@ -16,6 +16,7 @@
   --accent: #6cb6ff;
   --sel: #e8edf2;
   --err: #d3766f;
+  --link: #e3b341;
 }
 @media (prefers-color-scheme: light) {
   :root {
@@ -27,6 +28,7 @@
     --accent: #2670c2;
     --sel: #1c2127;
     --err: #a04b43;
+    --link: #9a6700;
   }
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -343,6 +345,9 @@ main.hasSel { grid-template-columns: 1fr minmax(420px, 46%); }
 }
 #panel .none { color: var(--dim); }
 #panel .shared { color: var(--dim); word-break: break-all; margin-top: 2px; }
+/* nearest-neighbor list (TKI-70): visited this session, not hidden */
+#panel li.visited { opacity: .55; }
+#panel li.visited .name::before { content: "✓ "; }
 
 /* ── code viewer (TKI-61) ── */
 #panel .actions { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
@@ -509,6 +514,7 @@ let labelBoxes = [];        // dir labels placed this frame, for single-click dr
 let mouse = null;           // last cursor position; hover hit-tests run per rAF
 let edgeHover = null;       // {a, b} — the labeled layout edge under the cursor
 let hoverLabel = null;      // the drillable island label under the cursor
+let linkHover = -1;         // symbol id named by a hovered panel row (TKI-70)
 const edgeTerms = new Map(); // "lo:hi" -> shared terms (/api/edge, cached)
 /* living boards (TKI-68) */
 const srcCache = new Map(); // id -> /api/source payload (null = in flight)
@@ -669,6 +675,7 @@ function draw() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
   const dimInk = cssVar("--dim"), selInk = cssVar("--sel"), accent = cssVar("--accent");
+  const linkInk = cssVar("--link");
   const focus = focusDirs.size > 0;
 
   // time view: date gridlines under the points
@@ -780,6 +787,28 @@ function draw() {
     ctx.strokeStyle = selInk;
     ctx.lineWidth = 2;
     ctx.stroke();
+  }
+  // row-hover link (TKI-70): a panel row naming a symbol highlights its
+  // dot while hovered. Dashed halo + 4 crosshair ticks in --link, wider
+  // offset than the hover/selection/search/branch rings above and a shape
+  // none of them use, so it never reads as one of them (#39: cancels on
+  // mouseleave via linkHover = -1, no orphaned state).
+  if (linkHover >= 0 && visible(S[linkHover])) {
+    const [x, y] = screenXY(linkHover);
+    const r = radii[linkHover] + 6;
+    ctx.strokeStyle = linkInk;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, 6.2832);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+      ctx.beginPath();
+      ctx.moveTo(x + dx * (r + 2), y + dy * (r + 2));
+      ctx.lineTo(x + dx * (r + 7), y + dy * (r + 7));
+      ctx.stroke();
+    }
   }
 
   // semantic zoom (TKI-69) + board cards (TKI-68): everything below is
@@ -1405,11 +1434,17 @@ function removeBoard(b) {
     const [x, y] = key.split(":").map(Number);
     if (x === b.id || y === b.id) manualPairs.delete(key);
   }
+  // TKI-70: the card (and any hovered inline link in it) is gone with no
+  // mouseleave — e.g. the Esc ladder removes the newest board out from
+  // under a stationary cursor. Unconditional clear; over-clearing across
+  // an unrelated board is harmless (#39).
+  linkHover = -1;
   scheduleDraw();
 }
 function minimizeBoard(b) {
   b.min = true;
   b.el.style.display = "none";
+  linkHover = -1; // TKI-70: same orphaned-highlight guard as removeBoard
   const chip = document.createElement("span");
   chip.className = "bchip";
   chip.textContent = S[b.id].qname;
@@ -1583,7 +1618,14 @@ function drawBoards(W, H, accent, dimInk) {
   const rects = new Map(); // id -> screen rect + its dot's screen position
   for (const b of boards) {
     if (b.min) continue;
-    if (!visible(S[b.id])) { b.el.style.display = "none"; continue; } // out of scope: card waits
+    if (!visible(S[b.id])) {
+      // TKI-70: the card is about to vanish (out of scope) — same
+      // orphaned-highlight guard as removeBoard, but only on the actual
+      // hide transition, not every frame it stays hidden.
+      if (b.el.style.display !== "none") linkHover = -1;
+      b.el.style.display = "none";
+      continue; // out of scope: card waits
+    }
     if (b.el.style.display === "none") { b.el.style.display = ""; measureBoard(b); }
     const [dx, dy] = screenXY(b.id);
     const r = placeBoard(b, dx, dy, W, H, [...rects.values()]);
@@ -2055,7 +2097,28 @@ function refLine(ref, extra, cmpA) {
     li.appendChild(go);
   }
   li.addEventListener("click", () => select(ref.id, true));
+  bindRowLink(li, ref.id);
   return li;
+}
+/* ── row → map hover linking (TKI-70): any element that names a symbol —
+   a panel row, or an inline code-viewer identifier link — highlights that
+   symbol's dot on the map while it's hovered. Pure client state, the
+   element already carries the id, so this never fetches (#1). If the
+   symbol isn't drawn in the current scope (drilled out, or a test with
+   tests hidden) it hints instead of silently no-op'ing; it does not
+   auto-pan or auto-drill (#21). Leaving cancels the highlight
+   immediately (#39). ── */
+function bindRowLink(li, id) {
+  const baseTitle = li.title;
+  li.addEventListener("mouseenter", () => {
+    if (!visible(S[id])) { li.title = baseTitle + " — outside current view"; return; }
+    linkHover = id;
+    scheduleDraw();
+  });
+  li.addEventListener("mouseleave", () => {
+    li.title = baseTitle;
+    if (linkHover === id) { linkHover = -1; scheduleDraw(); }
+  });
 }
 function listSection(title, titleDim, build) {
   const sec = document.createElement("section");
@@ -2088,6 +2151,7 @@ function emitToks(el, text, toks, from, to, links) {
       sp.classList.add("lnk");
       sp.title = `${S[t[3]].qname} — ${S[t[3]].file}:${S[t[3]].line}`;
       sp.addEventListener("click", () => select(t[3], true));
+      bindRowLink(sp, t[3]); // TKI-70: same map-highlight as panel rows
     }
     el.appendChild(sp);
     pos = e;
@@ -2112,6 +2176,7 @@ async function loadCard(id) {
   const card = $("card");
   card.className = "";
   card.textContent = "";
+  linkHover = -1; // the old card's rows are gone; no orphaned highlight (#39)
 
   const h2 = document.createElement("h2");
   h2.appendChild(qnameSpan(c.qname));
@@ -2277,20 +2342,28 @@ async function loadCard(id) {
     }));
   }
 
-  // guidance: the nearest layout neighbor not yet visited this session —
-  // answers "what related code haven't I read?". Ranked by map-plane
-  // distance (a fact of what is drawn); no model numbers shown.
+  // guidance (TKI-70): the 5 nearest layout neighbors — answers "what
+  // related code is here?" without forcing a jump-back-and-forth through a
+  // single row. Ranked by map-plane distance (a fact of what is drawn); no
+  // model numbers shown. Visited ones stay in the list, just marked — the
+  // list is a map of the neighborhood, not a to-do queue.
   const [sx, sy] = mapXY(S[id]);
-  const next = neighborsOf(id)
-    .filter(j => visible(S[j]) && !visited.has(j))
+  const nearest = neighborsOf(id)
+    .filter(j => visible(S[j]))
     .map(j => { const [x, y] = mapXY(S[j]); return [Math.hypot(x - sx, y - sy), j]; })
     .filter(d => isFinite(d[0]))
-    .sort((a, b) => a[0] - b[0])[0];
-  if (next) {
-    card.appendChild(listSection("next", "nearest unvisited layout neighbor", sec => {
+    .sort((a, b) => a[0] - b[0])
+    .slice(0, 5);
+  if (nearest.length) {
+    card.appendChild(listSection("nearest layout neighbors",
+        "closest first · ✓ visited this session", sec => {
       const ul = document.createElement("ul");
-      const s = S[next[1]];
-      ul.appendChild(refLine({id: s.id, qname: s.qname, file: s.file, line: s.line}, undefined, id));
+      nearest.forEach(([, j]) => {
+        const s = S[j];
+        const li = refLine({id: s.id, qname: s.qname, file: s.file, line: s.line}, undefined, id);
+        if (visited.has(j)) li.classList.add("visited");
+        ul.appendChild(li);
+      });
       sec.appendChild(ul);
     }));
   }
@@ -2603,6 +2676,7 @@ function renderGuide() {
   const card = $("card");
   card.className = "";
   card.textContent = "";
+  linkHover = -1; // the old card's rows are gone; no orphaned highlight (#39)
   const scope = S.filter(s => visible(s));
   const h2 = document.createElement("h2");
   h2.textContent = "start";
@@ -2649,8 +2723,11 @@ function renderGuide() {
     n.textContent = text;
     return n;
   };
-  const symRow = (s, value) =>
-    row(qnameSpan(s.qname), value, `${s.qname} — ${s.file}:${s.line}`, () => select(s.id, true));
+  const symRow = (s, value) => {
+    const li = row(qnameSpan(s.qname), value, `${s.qname} — ${s.file}:${s.line}`, () => select(s.id, true));
+    bindRowLink(li, s.id);
+    return li;
+  };
 
   if (!drill || drill.kind !== "file") {
     const counts = new Map();
