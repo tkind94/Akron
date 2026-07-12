@@ -669,7 +669,7 @@ fn explain_endpoint_serves_the_card_fields() {
     let keys = v.as_object().unwrap();
     for field in [
         "qname", "file", "line", "nodes", "is_test", "branch_new", "nearest_existing", "entry",
-        "dating", "clones", "twins", "callers", "callees", "family",
+        "dating", "facts", "clones", "twins", "callers", "callees", "family",
     ] {
         assert!(keys.contains_key(field), "card field {field} present");
     }
@@ -697,6 +697,84 @@ fn explain_lists_clones_with_ids_that_point_back_into_the_map() {
     let id = exact[0]["id"].as_u64().unwrap() as usize;
     assert!(id < symbols.len(), "clone reference is a valid map id");
     assert_eq!(exact[0]["file"], symbols[id].sym.file.as_str());
+}
+
+#[test]
+fn explain_serves_facts_matching_the_cli_card_for_a_symbol_with_clones_and_family() {
+    // clone_original.py's parse_records is the same fixture the CLI's own
+    // facts tests (tests/explain.rs) pin: shape 3 members/3 files, name
+    // corpus-unique, family F1 4 members/4 files — the JSON must state the
+    // identical words, not a re-derivation (TKI-77, #41).
+    let state = fixture_state();
+    let symbols = &state.analysis.scanned.symbols;
+    let orig = symbols
+        .iter()
+        .position(|s| s.sym.file == "clone_original.py")
+        .expect("planted fixture present");
+    let v = json(&explore::respond(&state, &format!("/api/explain?id={orig}")));
+    let facts = &v["facts"];
+    assert_eq!(facts["shape_members"], 3);
+    assert_eq!(facts["shape_files"], 3);
+    assert_eq!(facts["name_key"], "parse_records");
+    assert_eq!(facts["name_count"], 1);
+    let lines: Vec<&str> = facts["lines"].as_array().unwrap().iter().map(|s| s.as_str().unwrap()).collect();
+    assert_eq!(
+        lines,
+        [
+            "shape 3 members across 3 files",
+            "name \"parse_records\" corpus-unique",
+            "family F1 4 members across 4 files",
+        ],
+        "facts.lines must match the CLI card's clauses verbatim: {lines:?}"
+    );
+    assert_eq!(
+        lines.join(" \u{b7} "),
+        "shape 3 members across 3 files \u{b7} name \"parse_records\" corpus-unique \u{b7} family F1 4 members across 4 files",
+        "joined with the CLI's separator, this is the exact `facts` line printed by `akron explain`"
+    );
+}
+
+#[test]
+fn explain_serves_facts_with_no_family_fragment_for_a_corpus_unique_symbol() {
+    // generic_disjoint.py's mix_channels shares no shape, name, or family
+    // with anything else in the fixtures — both prevalence facts read 1,
+    // and (like the CLI card) the family clause is absent entirely, not
+    // present-and-empty.
+    let state = fixture_state();
+    let symbols = &state.analysis.scanned.symbols;
+    let id = symbols
+        .iter()
+        .position(|s| s.sym.file == "generic_disjoint.py")
+        .expect("planted fixture present");
+    let v = json(&explore::respond(&state, &format!("/api/explain?id={id}")));
+    let facts = &v["facts"];
+    assert_eq!(facts["shape_members"], 1);
+    assert_eq!(facts["shape_files"], 1);
+    assert_eq!(facts["name_key"], "mix_channels");
+    assert_eq!(facts["name_count"], 1);
+    let lines: Vec<&str> = facts["lines"].as_array().unwrap().iter().map(|s| s.as_str().unwrap()).collect();
+    assert_eq!(
+        lines,
+        ["shape corpus-unique", "name \"mix_channels\" corpus-unique"],
+        "no family clause when the symbol has no family membership: {lines:?}"
+    );
+    assert!(v["family"].is_null(), "family field itself is also absent");
+}
+
+#[test]
+fn explain_endpoint_facts_are_byte_identical_across_two_state_builds() {
+    let state_a = fixture_state();
+    let state_b = fixture_state();
+    let orig = state_a
+        .analysis
+        .scanned
+        .symbols
+        .iter()
+        .position(|s| s.sym.file == "clone_original.py")
+        .expect("planted fixture present");
+    let a = explore::respond(&state_a, &format!("/api/explain?id={orig}"));
+    let b = explore::respond(&state_b, &format!("/api/explain?id={orig}"));
+    assert_eq!(a.body, b.body, "/api/explain (facts included) must be deterministic");
 }
 
 #[test]

@@ -899,6 +899,44 @@ fn fmt_count(symbols: &[SymbolPrint], ids: &[usize]) -> String {
     }
 }
 
+/// The rendered fact clauses (TKI-74/77): shape prevalence, name
+/// prevalence, then family size if present — same words and pluralization
+/// for the CLI card and `explore`'s JSON panel (#41), computed once here
+/// so neither caller reimplements the formatting.
+pub fn fact_lines(facts: &CardFacts, family: Option<&CardFamily>) -> Vec<String> {
+    let files_word = |n: u32| if n == 1 { "file" } else { "files" };
+    let mut parts = vec![
+        if facts.shape_members > 1 {
+            format!(
+                "shape {} members across {} {}",
+                facts.shape_members,
+                facts.shape_files,
+                files_word(facts.shape_files)
+            )
+        } else {
+            "shape corpus-unique".to_string()
+        },
+        if facts.name_count > 1 {
+            format!(
+                "name {:?} shared by {} corpus symbols",
+                facts.name_key, facts.name_count
+            )
+        } else {
+            format!("name {:?} corpus-unique", facts.name_key)
+        },
+    ];
+    if let Some(f) = family {
+        parts.push(format!(
+            "family F{} {} members across {} {}",
+            f.index + 1,
+            f.members,
+            f.n_files,
+            files_word(f.n_files as u32)
+        ));
+    }
+    parts
+}
+
 fn render_card(analysis: &Analysis, cfg: &Config, target: usize) -> Result<()> {
     let symbols = &analysis.scanned.symbols;
     let s = &symbols[target].sym;
@@ -929,36 +967,7 @@ fn render_card(analysis: &Analysis, cfg: &Config, target: usize) -> Result<()> {
 
     // ── facts: corpus-grounded prevalence — always printed, like role
     // twins/callers/callees below (a base rate of 1 is itself a fact) ──
-    let files_word = |n: u32| if n == 1 { "file" } else { "files" };
-    let mut fact_parts = vec![
-        if data.facts.shape_members > 1 {
-            format!(
-                "shape {} members across {} {}",
-                data.facts.shape_members,
-                data.facts.shape_files,
-                files_word(data.facts.shape_files)
-            )
-        } else {
-            "shape corpus-unique".to_string()
-        },
-        if data.facts.name_count > 1 {
-            format!(
-                "name {:?} shared by {} corpus symbols",
-                data.facts.name_key, data.facts.name_count
-            )
-        } else {
-            format!("name {:?} corpus-unique", data.facts.name_key)
-        },
-    ];
-    if let Some(f) = &data.family {
-        fact_parts.push(format!(
-            "family F{} {} members across {} {}",
-            f.index + 1,
-            f.members,
-            f.n_files,
-            files_word(f.n_files as u32)
-        ));
-    }
+    let fact_parts = fact_lines(&data.facts, data.family.as_ref());
     println!("facts       {}", fact_parts.join(" \u{b7} "));
 
     // ── clones: omitted entirely when the symbol has none ──
