@@ -37,6 +37,14 @@ sha2 = { version = "0.10", optional = true }
 # no tokio/hyper tree for a localhost single-user tool.
 tiny_http = { version = "0.12", optional = true }
 
+# sha2's aarch64 backend is gated behind this feature (unlike x86_64, whose
+# SHA-NI dispatch is unconditional) — without it the model-integrity hash
+# (embed.rs) falls back to the pure-software compressor, ~5x slower on
+# Apple Silicon (TKI-73). x86_64 doesn't need the equivalent here: its
+# hardware path is already the default.
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+sha2 = { version = "0.10", optional = true, features = ["asm-aarch64"] }
+
 [profile.release]
 lto = true
 
