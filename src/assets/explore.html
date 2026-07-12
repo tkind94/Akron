@@ -18,6 +18,7 @@
   --err: #d3766f;
   --link: #e3b341;
   --call: #dba25e;
+  --call-in: #9d8fd6;
 }
 @media (prefers-color-scheme: light) {
   :root {
@@ -31,6 +32,7 @@
     --err: #a04b43;
     --link: #9a6700;
     --call: #96601c;
+    --call-in: #6f56c4;
   }
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -110,8 +112,9 @@ body {
   max-width: 190px;
 }
 #topbar input[type=checkbox] { accent-color: var(--accent); }
-/* calls toggle (TKI-72): ≥24px hit target (#19) without changing the bar's
-   height — padding expands the hit box, the negative margin refunds it */
+/* calls depth control (TKI-72/79): ≥24px hit target (#19) without changing
+   the bar's height — padding expands the hit box, the negative margin
+   refunds it */
 #callsLbl { padding: 6px 4px; margin: -6px -4px; }
 #views { display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
 #views button {
@@ -472,7 +475,12 @@ footer {
     <label>y <select id="ay"></select></label>
   </span>
   <label><input type="checkbox" id="tests"> tests</label>
-  <label id="callsLbl" title="show static call edges for the selection and pinned cards — name-resolved direct calls, no dynamic dispatch"><input type="checkbox" id="calls"> calls</label>
+  <label id="callsLbl" title="follow the chain of calls around the selection — callers and callees, this many hops out; static name-resolved calls, no dynamic dispatch">calls <select id="calls">
+    <option value="0" selected>off</option>
+    <option value="1">1 hop</option>
+    <option value="2">2 hops</option>
+    <option value="3">3 hops</option>
+  </select></label>
   <label title="zooming deep over a cluster opens it; zooming far out climbs back — off: labels and path segments drill as always"><input type="checkbox" id="zoomdrill"> zoom drills</label>
 </header>
 <div id="chips"></div>
@@ -519,7 +527,7 @@ let META = {pca_var: [], labels: {prod: [], full: []}}; // /api/meta
 let radii = [];             // px per symbol
 let dirColor = {};          // top-level dir -> color
 let showTests = BOOT.tests;
-let showCalls = false;      // the calls channel toggle (TKI-72)
+let callDepth = 0;          // calls channel (TKI-72/79): BFS hops from the selection, 0 = off
 let callersOf = [];         // per-symbol incoming call ids — S[].calls inverted once at boot
 let focusDirs = new Set();  // legend chips; empty = all
 let branchFocus = false;    // branch chip: ring branch-new, fade the rest
@@ -561,7 +569,7 @@ let zoomDrill = false;       // auto-drill flag; manual drill is always on
 let adTimer = 0;             // committed-crossing settle timer
 const subCache = new Map();  // path -> /api/sublayout payload (deterministic)
 const LOD = {chipK: 2, chipCell: 60, cardK: 5, cardCell: 180, cardScale: 360,
-             cardCap: 16, inK: 8, outK: 0.4, settle: 250};
+             cardCap: 16, tol: 12, inK: 8, outK: 0.4, settle: 250};
 let mode = "map";           // map | anchor | time | axes
 let axisX = "map_x", axisY = "map_y";
 let px, py;                 // Float64Array world coords in [0,1]
@@ -714,7 +722,7 @@ function draw() {
   const dimInk = cssVar("--dim"), selInk = cssVar("--sel"), accent = cssVar("--accent");
   const linkInk = cssVar("--link");
   const focus = focusDirs.size > 0;
-  callAmbigDrawn = false; // recomputed by this frame's call-edge passes
+  callAmbigDrawn = callSelDrawn = callConnDrawn = false; // recomputed by this frame's call-edge passes
 
   // time view: date gridlines under the points
   if (mode === "time" && isFinite(ext.x[0]) && ext.x[1] > ext.x[0]) {
@@ -739,12 +747,17 @@ function draw() {
   // (what a click would fan out), and the edge under the cursor draws hot
   if (mode === "map") {
     drawDirLabels(W, H, dimInk);
-    if (hovered >= 0 && hovered !== selected && visible(S[hovered])) drawEdges(hovered, 0.25, accent);
-    if (selected >= 0 && visible(S[selected])) drawEdges(selected, 0.6, accent);
-    // calls channel (TKI-72): the selection's directed call edges —
-    // structure in --call, never confusable with the accent similarity
-    // edges above; selection-scoped, never all-pairs at repo zoom
-    if (showCalls && selected >= 0 && visible(S[selected])) drawCallEdges(cssVar("--call"));
+    // while a call graph is drawn, the similarity edges recede — still
+    // present, still hoverable, but the question being asked is the call
+    // chain, and two edge systems at full ink cancel each other out (#23)
+    const callsOn = callDepth > 0 && selected >= 0 && visible(S[selected]);
+    if (hovered >= 0 && hovered !== selected && visible(S[hovered])) drawEdges(hovered, callsOn ? 0.12 : 0.25, accent);
+    if (selected >= 0 && visible(S[selected])) drawEdges(selected, callsOn ? 0.3 : 0.6, accent);
+    // calls channel (TKI-72, depth BFS TKI-79): the selection's call
+    // graph — structure in --call/--call-in, never confusable with the
+    // accent similarity edges above; selection-scoped, never all-pairs
+    // at repo zoom
+    if (callsOn) drawCallEdges(cssVar("--call"), cssVar("--call-in"));
     if (edgeHover && visible(S[edgeHover.a]) && visible(S[edgeHover.b])) {
       const [x0, y0] = screenXY(edgeHover.a);
       const [x1, y1] = screenXY(edgeHover.b);
@@ -800,6 +813,14 @@ function draw() {
       ctx.arc(x, y, r + 3, 0, 6.2832);
       ctx.stroke();
     }
+  }
+
+  // calls channel (TKI-79): hop-2+ dots wear a thin ring in their
+  // direction's hue, fading on the same ladder as the edges — hop-1 dots
+  // are already touched by an edge from the selection, farther ones need
+  // the mark to keep the chain followable
+  if (mode === "map" && callDepth > 0 && selected >= 0 && visible(S[selected])) {
+    drawCallRings(W, H);
   }
 
   // search hits: accent ring
@@ -882,12 +903,22 @@ function draw() {
     if (drill) cap += ` · drill: ${drill.path} · ${drill.ids.length} of ${BOOT.count} symbols`;
     if (selected >= 0 && visible(S[selected])) cap += " · edges: selection's layout neighbors";
     // the calls channel's legend line (#28): what the arrows are — and are
-    // not — including the honest cap when the server dropped ids (#24)
-    if (showCalls) {
-      cap += " · → calls: name-resolved static calls, direct only";
+    // not — including the honest count when the server or the render cap
+    // dropped edges (#24). Clauses describe only ink actually on screen
+    // this frame, so the legend can never claim an encoding nothing uses.
+    if (callDepth > 0 && (callSelDrawn || callConnDrawn)) {
+      cap += callDepth === 1
+        ? " · → calls: name-resolved static calls, direct only"
+        : ` · → calls, ${callDepth} hops: name-resolved static calls, direct only`;
+      if (callSelDrawn) {
+        cap += " · callees amber · callers violet";
+        if (callDepth > 1) cap += " · fainter = farther";
+      }
       if (callAmbigDrawn) cap += " · dashed = one of N same-name candidates";
-      if (selected >= 0 && visible(S[selected]) && S[selected].calls_over) {
-        cap += ` · ${S[selected].calls_over} more callees not drawn`;
+      if (callSelDrawn) {
+        const g = ensureCallGraph();
+        const missing = g.over + g.dropped;
+        if (missing) cap += ` · ${missing} more call edges not drawn`;
       }
     }
     drawCaption(cap, W, H);
@@ -974,6 +1005,63 @@ function callFanout(caller, j) {
   return n;
 }
 let callAmbigDrawn = false; // any dashed call edge this frame → caption clause
+let callSelDrawn = false;   // selection-graph arrows on screen this frame
+let callConnDrawn = false;  // pinned-board call connectors on screen this frame
+
+/* ── depth BFS (TKI-79): the chain of calls around the selection ──
+   Callee direction (what the selection ultimately calls) and caller
+   direction (what ultimately calls it), each walked to the chosen depth
+   over the same edge set the panel's callers/callees lists show —
+   client-side over S[].calls and its boot-time inversion, zero fetches
+   (#1). Hue = direction, opacity fades by hop (#25); both stated in the
+   caption (#28). Deterministic: S order, hop order, first edge wins. */
+const CALL_ALPHA = [0.9, 0.5, 0.3];  // ink at hop 1 / 2 / 3
+const CALL_EDGE_CAP = 400;           // render cap; the caption counts the rest
+let callGraph = null;                // cached {key, edges, nodes, over, dropped}
+function callAlpha(hop) { return CALL_ALPHA[Math.min(hop, CALL_ALPHA.length) - 1]; }
+function ensureCallGraph() {
+  const key = `${selected}:${callDepth}:${showTests ? 1 : 0}:${drill ? drill.path : ""}`;
+  if (callGraph && callGraph.key === key) return callGraph;
+  const g = {key, edges: [], nodes: new Map(), over: 0, dropped: 0};
+  callGraph = g;
+  if (callDepth < 1 || selected < 0 || !visible(S[selected])) return g;
+  const eKeys = new Set();
+  // one directed edge, deduped across the two walks (a cycle through the
+  // selection reaches the same edge from both sides); returns whether the
+  // edge is on screen, so a capped-out edge never seeds further hops
+  const addEdge = (a, b, hop, dir) => {
+    const k = a + ">" + b;
+    if (eKeys.has(k)) return true;
+    eKeys.add(k);
+    if (g.edges.length >= CALL_EDGE_CAP) { g.dropped++; return false; }
+    g.edges.push({a, b, hop, dir});
+    return true;
+  };
+  g.nodes.set(selected, {hop: 0, dir: "out"});
+  for (const dir of ["out", "in"]) {
+    let frontier = [selected];
+    const walked = new Set(frontier);
+    for (let hop = 1; hop <= callDepth && frontier.length; hop++) {
+      const next = [];
+      for (const u of frontier) {
+        // the server caps each row's callee list (calls_over): those edges
+        // exist but can't be drawn — counted into the caption's clause (#24)
+        if (dir === "out") g.over += S[u].calls_over || 0;
+        for (const v of dir === "out" ? S[u].calls : callersOf[u]) {
+          if (!visible(S[v])) continue;
+          const drawn = dir === "out" ? addEdge(u, v, hop, dir) : addEdge(v, u, hop, dir);
+          if (!drawn || walked.has(v)) continue;
+          walked.add(v);
+          next.push(v);
+          const seen = g.nodes.get(v);
+          if (!seen || hop < seen.hop) g.nodes.set(v, {hop, dir});
+        }
+      }
+      frontier = next;
+    }
+  }
+  return g;
+}
 
 // One arrow from (x0,y0) toward dot b: shortened to b's rim, head at the
 // callee end — direction IS the encoding (caller → callee). A dashed
@@ -998,42 +1086,59 @@ function callArrow(x0, y0, x1, y1, rb, dashed) {
   ctx.closePath();
   ctx.fill();
 }
-function drawCallEdges(ink) {
-  ctx.strokeStyle = ink;
-  ctx.fillStyle = ink;
-  const one = (a, b) => {
-    if (!visible(S[a]) || !visible(S[b])) return;
-    const hot = edgeHover && edgeHover.call && edgeHover.a === a && edgeHover.b === b;
-    ctx.globalAlpha = hot ? 0.95 : 0.6;
+function drawCallEdges(outInk, inInk) {
+  const g = ensureCallGraph();
+  for (const e of g.edges) {
+    const hot = edgeHover && edgeHover.call && edgeHover.a === e.a && edgeHover.b === e.b;
+    const ink = e.dir === "out" ? outInk : inInk;
+    ctx.strokeStyle = ink;
+    ctx.fillStyle = ink;
+    ctx.globalAlpha = hot ? 0.95 : callAlpha(e.hop);
     ctx.lineWidth = hot ? 1.5 : 1;
-    const [x0, y0] = screenXY(a);
-    const [x1, y1] = screenXY(b);
-    const ambig = callFanout(a, b) >= 2;
+    const [x0, y0] = screenXY(e.a);
+    const [x1, y1] = screenXY(e.b);
+    const ambig = callFanout(e.a, e.b) >= 2;
     if (ambig) callAmbigDrawn = true;
-    callArrow(x0, y0, x1, y1, radii[b], ambig);
-  };
-  for (const j of S[selected].calls) one(selected, j);
-  for (const j of callersOf[selected]) one(j, selected);
+    callArrow(x0, y0, x1, y1, radii[e.b], ambig);
+  }
+  if (g.edges.length) callSelDrawn = true;
   ctx.globalAlpha = 1;
   ctx.lineWidth = 1;
 }
-// The selection's call edge nearest the cursor (mirrors nearestEdge's ≤6px
-// band), or null. Only the selection's own in/out edges are tested.
+// Thin hue-matched rings on the graph's hop-2+ dots (see the caller in
+// draw() for why hop-1 dots go unmarked).
+function drawCallRings(W, H) {
+  const g = ensureCallGraph();
+  if (!g.nodes.size) return;
+  const inks = {out: cssVar("--call"), in: cssVar("--call-in")};
+  ctx.lineWidth = 1;
+  for (const [id, n] of g.nodes) {
+    if (n.hop < 2) continue;
+    const [x, y] = screenXY(id);
+    const r = radii[id] + 2;
+    if (x < -r || y < -r || x > W + r || y > H + r) continue;
+    ctx.globalAlpha = callAlpha(n.hop);
+    ctx.strokeStyle = inks[n.dir];
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, 6.2832);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+// The call edge nearest the cursor (mirrors nearestEdge's ≤6px band), or
+// null. Tests exactly the edges this frame draws — the whole BFS graph.
 function nearestCallEdge(mx, my) {
   let best = null, bestD = 6;
-  const test = (a, b) => {
-    if (!visible(S[a]) || !visible(S[b])) return;
-    const [x0, y0] = screenXY(a);
-    const [x1, y1] = screenXY(b);
+  for (const e of ensureCallGraph().edges) {
+    const [x0, y0] = screenXY(e.a);
+    const [x1, y1] = screenXY(e.b);
     const dx = x1 - x0, dy = y1 - y0;
     const len2 = dx * dx + dy * dy;
-    if (!len2) return;
+    if (!len2) continue;
     const t = Math.max(0, Math.min(1, ((mx - x0) * dx + (my - y0) * dy) / len2));
     const d = Math.hypot(mx - (x0 + t * dx), my - (y0 + t * dy));
-    if (d < bestD) { bestD = d; best = {a, b, call: true}; }
-  };
-  for (const j of S[selected].calls) test(selected, j);
-  for (const j of callersOf[selected]) test(j, selected);
+    if (d < bestD) { bestD = d; best = {a: e.a, b: e.b, call: true, hop: e.hop, dir: e.dir}; }
+  }
   return best;
 }
 
@@ -1264,7 +1369,7 @@ function footer() {
   dateNote(axisX, "x", parked.x);
   dateNote(axisY, "y", parked.y);
   // calls on, nothing to draw yet: say what would make edges appear (#14)
-  if (showCalls && mode === "map" && selected < 0 && !boards.some(b => !b.min)) {
+  if (callDepth > 0 && mode === "map" && selected < 0 && !boards.some(b => !b.min)) {
     notes.push("calls: select or pin a symbol to see its call edges");
   }
   if (mode === "axes") {
@@ -1347,7 +1452,7 @@ function hoverUpdate() {
       // calls channel (TKI-72): a call arrow is hoverable identity too —
       // the similarity edge wins a tie (it was there first, and both tips
       // name the same pair)
-      if (!edge && showCalls) edge = nearestCallEdge(mouse.x, mouse.y);
+      if (!edge && callDepth > 0) edge = nearestCallEdge(mouse.x, mouse.y);
     }
   }
   const changed = h !== hovered || !sameEdge(edge, edgeHover) ||
@@ -1368,11 +1473,13 @@ function hoverUpdate() {
 
 // A call edge's honest one-liner: the encoding, plus "one of N" when the
 // resolver kept N same-name candidates instead of picking (edge.a is the
-// caller for every call-flavored edge/connector).
+// caller for every call-flavored edge/connector), plus the hop distance
+// when the edge sits deeper than one hop in the BFS graph (TKI-79).
 function callEdgeHint(edge) {
   const fan = callFanout(edge.a, edge.b);
   return "name-resolved static call · direct only"
-    + (fan >= 2 ? ` · one of ${fan} same-name candidates` : "");
+    + (fan >= 2 ? ` · one of ${fan} same-name candidates` : "")
+    + (edge.hop >= 2 ? ` · ${edge.hop} hops ${edge.dir === "out" ? "downstream" : "upstream"} of the selection` : "");
 }
 function tipLine(cls, text) {
   const d = document.createElement("div");
@@ -1410,7 +1517,7 @@ function tooltip() {
       // the same pair can also be a call edge (TKI-72): the layout edge
       // wins the hover, but the call fact — and its same-name ambiguity —
       // must not vanish under it (#28); arrow = direction vs the names above
-      if (showCalls) {
+      if (callDepth > 0) {
         if (S[edgeHover.a].calls.includes(edgeHover.b)) {
           tip.appendChild(tipLine("t-hint", "→ " + callEdgeHint(edgeHover)));
         }
@@ -1765,12 +1872,10 @@ function rectEdgePoint(r, tx, ty) {
   const s = Math.min(sx, sy);
   return [cx + dx * s, cy + dy * s];
 }
-// The connector under the cursor: a 24px band around the line (#19), or
-// its midpoint label box.
+// The connector under the cursor: a 24px band around the line (#19).
 function connectorAt(mx, my) {
   let best = null, bestD = 12;
   for (const c of connSegs) {
-    if (mx >= c.lx0 && mx <= c.lx1 && my >= c.ly0 && my <= c.ly1) return c;
     const dx = c.x1 - c.x0, dy = c.y1 - c.y0;
     const len2 = dx * dx + dy * dy;
     const t = len2 ? Math.max(0, Math.min(1, ((mx - c.x0) * dx + (my - c.y0) * dy) / len2)) : 0;
@@ -1819,7 +1924,6 @@ function placeBoard(b, dx, dy, W, H, placed) {
   return {x: best.x, y: best.y, w: b.w, h: b.h, dx, dy};
 }
 function drawBoards(W, H, accent, dimInk) {
-  const panel = cssVar("--panel");
   const rects = new Map(); // id -> screen rect + its dot's screen position
   for (const b of boards) {
     if (b.min) continue;
@@ -1851,26 +1955,25 @@ function drawBoards(W, H, accent, dimInk) {
     ctx.stroke();
   }
   ctx.globalAlpha = 1;
-  // connectors: card-edge to card-edge, vocabulary label at the midpoint
+  // connectors: card-edge to card-edge, vocabulary terms on hover
   const ids = [...rects.keys()];
-  ctx.font = "10px ui-monospace, Menlo, monospace";
   for (let i = 0; i < ids.length; i++) {
     for (let j = i + 1; j < ids.length; j++) {
       const lo = Math.min(ids[i], ids[j]), hi = Math.max(ids[i], ids[j]);
       if (!manualPairs.has(pairKey(lo, hi)) &&
           !neighborsOf(lo).includes(hi) && !neighborsOf(hi).includes(lo)) continue;
-      drawConnSeg(rects.get(ids[i]), rects.get(ids[j]), lo, hi, accent, panel, false);
+      drawConnSeg(rects.get(ids[i]), rects.get(ids[j]), lo, hi, accent, false);
     }
   }
   // calls channel (TKI-72): a direct call edge between two pinned cards
-  // draws its own DIRECTED connector, labeled "calls" — never merged with
-  // the vocabulary connector above (structure and similarity are different
-  // facts; when both exist the call line offsets aside)
-  if (showCalls) {
+  // draws its own DIRECTED connector — never merged with the vocabulary
+  // connector above (structure and similarity are different facts; when
+  // both exist the call line offsets aside)
+  if (callDepth > 0) {
     for (const a of ids) {
       for (const b of ids) {
         if (a === b || !S[a].calls.includes(b)) continue;
-        drawCallConnSeg(rects.get(a), rects.get(b), a, b, panel);
+        drawCallConnSeg(rects.get(a), rects.get(b), a, b);
       }
     }
   }
@@ -1890,12 +1993,16 @@ function drawBoards(W, H, accent, dimInk) {
   }
 }
 
-// One labeled connector between two card rects — shared by pinned boards
-// and ambient LOD cards. Labels are vocabulary TERMS, never a score
-// (DESIGN.md §1.2). `ambient` draws fainter and shows the label only when
-// the on-screen edge is long enough to carry it; the seg always joins
-// connSegs, so hover and click→compare work identically for both kinds.
-function drawConnSeg(ra, rb, lo, hi, accent, panel, ambient) {
+// One connector between two card rects — shared by pinned boards and
+// ambient LOD cards. Its shared-vocabulary terms live in the hover tip
+// (TKI-79): a screen of always-on midpoint labels was the loudest ink in
+// the CEO's clutter screenshot, and each label repeated what one hover
+// already discloses (#17, #23). The terms still label the edge itself —
+// the tip rides the cursor, which is on the edge (#26) — and they still
+// prefetch here so the hover renders inside the 100ms contract (#1).
+// `ambient` draws fainter; the seg always joins connSegs, so hover and
+// click→compare work identically for both kinds.
+function drawConnSeg(ra, rb, lo, hi, accent, ambient) {
   ensureEdgeTerms({a: lo, b: hi}); // cached: one fetch per pair, ever
   const [x0, y0] = rectEdgePoint(ra, rb.x + rb.w / 2, rb.y + rb.h / 2);
   const [x1, y1] = rectEdgePoint(rb, ra.x + ra.w / 2, ra.y + ra.h / 2);
@@ -1908,36 +2015,19 @@ function drawConnSeg(ra, rb, lo, hi, accent, panel, ambient) {
   ctx.lineTo(x1, y1);
   ctx.stroke();
   ctx.globalAlpha = 1;
-  const seg = {a: lo, b: hi, x0, y0, x1, y1, lx0: 0, ly0: 0, lx1: -1, ly1: -1};
-  let lab = edgeTermText({a: lo, b: hi});
-  if (lab.length > 44) lab = lab.slice(0, 43) + "…";
-  const tw = ctx.measureText(lab).width;
-  if (!ambient || Math.hypot(x1 - x0, y1 - y0) > tw + 24) {
-    const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
-    ctx.globalAlpha = 0.92;
-    ctx.fillStyle = panel;
-    ctx.fillRect(mx - tw / 2 - 4, my - 8, tw + 8, 15);
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = accent;
-    ctx.textAlign = "center";
-    ctx.fillText(lab, mx, my + 3);
-    ctx.textAlign = "start";
-    seg.lx0 = mx - tw / 2 - 4;
-    seg.ly0 = my - 8;
-    seg.lx1 = mx + tw / 2 + 4;
-    seg.ly1 = my + 7;
-  }
-  connSegs.push(seg);
+  connSegs.push({a: lo, b: hi, x0, y0, x1, y1});
 }
 
 // One DIRECTED call connector between two pinned card rects (TKI-72):
-// caller-edge → callee-edge in --call with an arrowhead and a "calls"
-// midpoint label — visibly not the accent vocabulary connector. When the
-// pair also carries a similarity connector, this one steps 8px aside so
-// neither line nor label occludes the other (a mutual-recursion pair's two
-// arrows land on opposite sides for the same reason). The seg joins
-// connSegs like every connector: hover names it, click compares (#17).
-function drawCallConnSeg(ra, rb, a, b, panel) {
+// caller-edge → callee-edge in --call with an arrowhead — visibly not the
+// accent vocabulary connector. Its "calls" naming moved into the hover
+// tip with the vocabulary labels (TKI-79, same #17/#23 call): the hue and
+// arrowhead stay as the at-rest encoding, the caption legend spells them
+// out. When the pair also carries a similarity connector, this one steps
+// 8px aside so the lines don't occlude each other (a mutual-recursion
+// pair's two arrows land on opposite sides for the same reason). The seg
+// joins connSegs like every connector: hover names it, click compares.
+function drawCallConnSeg(ra, rb, a, b) {
   const ink = cssVar("--call");
   let [x0, y0] = rectEdgePoint(ra, rb.x + rb.w / 2, rb.y + rb.h / 2);
   let [x1, y1] = rectEdgePoint(rb, ra.x + ra.w / 2, ra.y + ra.h / 2);
@@ -1956,26 +2046,11 @@ function drawCallConnSeg(ra, rb, a, b, panel) {
   ctx.lineWidth = hot ? 1.5 : 1;
   const ambig = callFanout(a, b) >= 2;
   if (ambig) callAmbigDrawn = true;
+  callConnDrawn = true;
   callArrow(x0, y0, x1, y1, 0, ambig);
   ctx.globalAlpha = 1;
   ctx.lineWidth = 1;
-  const seg = {a, b, call: true, x0, y0, x1, y1, lx0: 0, ly0: 0, lx1: -1, ly1: -1};
-  const lab = "calls";
-  const tw = ctx.measureText(lab).width;
-  const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
-  ctx.globalAlpha = 0.92;
-  ctx.fillStyle = panel;
-  ctx.fillRect(mx - tw / 2 - 4, my - 8, tw + 8, 15);
-  ctx.globalAlpha = 1;
-  ctx.fillStyle = ink;
-  ctx.textAlign = "center";
-  ctx.fillText(lab, mx, my + 3);
-  ctx.textAlign = "start";
-  seg.lx0 = mx - tw / 2 - 4;
-  seg.ly0 = my - 8;
-  seg.lx1 = mx + tw / 2 + 4;
-  seg.ly1 = my + 7;
-  connSegs.push(seg);
+  connSegs.push({a, b, call: true, x0, y0, x1, y1});
 }
 
 /* ── semantic zoom (TKI-69): the elbow-room LOD ladder ──
@@ -2118,16 +2193,18 @@ function fillLodCard(c, id) {
   pre.className = "code";
   emitToks(pre, src.text, src.toks, 0, end, false);
   body.appendChild(pre);
-  const more = document.createElement("div");
-  more.className = "pk-more";
+  // the truncation count is a fact about the code; the old per-card "click
+  // the dot to pin" hint was N copies of one sentence (TKI-78) — the
+  // affordance already announces itself through the pointer cursor (#18),
+  // the peek card's own hint, and the footer's standing hint (#14)
   if (cut < src.text.length) {
+    const more = document.createElement("div");
+    more.className = "pk-more";
     let shown = 0;
     for (let i = 0; i < cut; i++) if (src.text.charCodeAt(i) === 10) shown++;
-    more.textContent = `… ${lineCount(src.text) - shown} more lines · click the dot to pin`;
-  } else {
-    more.textContent = "click the dot to pin";
+    more.textContent = `… ${lineCount(src.text) - shown} more lines`;
+    body.appendChild(more);
   }
-  body.appendChild(more);
   c.el.dataset.filled = "1";
   c.h = 0; // remeasure below
 }
@@ -2148,18 +2225,32 @@ function drawLodCards(W, H) {
     }
     cands.sort((a, b) => b.cell - a.cell || a.i - b.i); // deterministic cap
   }
-  for (const cd of cands.slice(0, LOD.cardCap)) {
+  for (const cd of cands) {
+    if (shown.size >= LOD.cardCap) break;
     const c = lodCard(cd.i);
-    if (!c.el.isConnected) { $("stage").appendChild(c.el); c.h = 0; }
+    if (!c.el.isConnected) $("stage").appendChild(c.el); // c.h keys on content, not attachment
     fillLodCard(c, cd.i);
-    if (!srcCache.has(cd.i)) lodWish.push({id: cd.i, cell: cd.cell});
     if (!c.h) c.h = c.el.offsetHeight; // measured once per content change
     const sc = Math.min(1.25, cd.cell / LOD.cardScale);
+    const r = {x: cd.x + 10, y: cd.y + 10, w: 340 * sc, h: c.h * sc};
+    // overlap thinning (TKI-78): a card that would land on an already-
+    // placed card beyond a sliver skips this frame — a wall of cards is
+    // less information, not more (#23). The dot keeps its canvas chip
+    // (drawChips skips only lodShown), so nothing goes nameless, and a
+    // later, non-clashing candidate takes the freed cap slot. The cleanup
+    // sweep below detaches the skipped card's element.
+    let clash = false;
+    for (const o of rects.values()) {
+      if (r.x + LOD.tol < o.x + o.w && o.x + LOD.tol < r.x + r.w &&
+          r.y + LOD.tol < o.y + o.h && o.y + LOD.tol < r.y + r.h) { clash = true; break; }
+    }
+    if (clash) continue;
+    if (!srcCache.has(cd.i)) lodWish.push({id: cd.i, cell: cd.cell});
     c.el.style.transform = `scale(${sc})`;
-    c.el.style.left = (cd.x + 10) + "px";
-    c.el.style.top = (cd.y + 10) + "px";
+    c.el.style.left = r.x + "px";
+    c.el.style.top = r.y + "px";
     shown.add(cd.i);
-    rects.set(cd.i, {x: cd.x + 10, y: cd.y + 10, w: 340 * sc, h: c.h * sc});
+    rects.set(cd.i, r);
   }
   for (const [id, c] of lodPool) {
     if (!shown.has(id) && c.el.isConnected) c.el.remove();
@@ -2174,8 +2265,6 @@ function drawLodCards(W, H) {
 // neighbors, in the layout's own nnp/nn ranking order (deterministic);
 // pairs dedupe. Pinned-board and manual-pair connectors are unaffected.
 function drawLodConnectors(rects, accent) {
-  const panel = cssVar("--panel");
-  ctx.font = "10px ui-monospace, Menlo, monospace";
   const pairs = new Set();
   for (const id of rects.keys()) {
     let n = 0;
@@ -2187,7 +2276,7 @@ function drawLodConnectors(rects, accent) {
   }
   for (const key of pairs) {
     const [lo, hi] = key.split(":").map(Number);
-    drawConnSeg(rects.get(lo), rects.get(hi), lo, hi, accent, panel, true);
+    drawConnSeg(rects.get(lo), rects.get(hi), lo, hi, accent, true);
   }
 }
 // The settle drain: the view has been still for LOD.settle ms — fetch the
@@ -3148,12 +3237,13 @@ function initControls() {
     adTimer = 0; // toggling off abandons any pending crossing
   });
 
-  // calls channel (TKI-72): persistent channel state like the tests
-  // toggle — never an Esc rung. Toggling off clears any call-flavored
-  // hover at once, even under a resting cursor (#39).
+  // calls channel (TKI-72, depth dropdown TKI-79): persistent channel
+  // state like the tests toggle — never an Esc rung. Switching off clears
+  // any call-flavored hover at once, even under a resting cursor (#39);
+  // switching depth just redraws (the BFS cache keys on depth).
   $("calls").addEventListener("change", () => {
-    showCalls = $("calls").checked;
-    if (!showCalls) {
+    callDepth = +$("calls").value;
+    if (!callDepth) {
       if (edgeHover && edgeHover.call) edgeHover = null;
       if (connHover && connHover.call) connHover = null;
       // a resting cursor gets no mousemove, so the tip must re-render
