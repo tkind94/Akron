@@ -205,6 +205,14 @@ neighbors connect card-to-card with lines labeled by their shared
 vocabulary — terms, never a number; click a line for the side-by-side, or
 drag one card's header onto another to wire an arbitrary pair. Escape
 dismisses the newest card; the side panel stays the deep dossier.
+**Semantic zoom (TKI-69):** zoom is disclosure — a dot with room around
+it sprouts its name, then its signature; deeper still it blooms an
+ambient code card (first lines, capped by what the viewport holds, never
+by repo size), and neighbor cards connect with vocabulary-labeled lines.
+Clicking always falls through to the dot (pin + select as above). The
+"zoom drills" toggle (off by default) makes a committed deep zoom over a
+labeled island open it and a committed far zoom-out climb back; labels
+and path segments drill regardless.
 **Guidance:** with nothing selected the panel lists factual starting
 points for the current scope — largest dirs/files, most-called symbols,
 last touched — each row a click; a selected card ends with the nearest
