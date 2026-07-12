@@ -81,6 +81,7 @@ use crate::pca;
 use crate::run::Analysis;
 use crate::types::{Config, ModuleRef, NormTree, SymbolPrint};
 use anyhow::Result;
+use rayon::prelude::*;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
@@ -355,39 +356,57 @@ pub fn scan_sources(root: &Path, symbols: &[SymbolPrint]) -> Vec<RawSource> {
         by_file.entry(s.sym.file.as_str()).or_default().push(i);
     }
     let mut out: Vec<RawSource> = (0..symbols.len()).map(|_| empty_raw()).collect();
-    for (file, ids) in by_file {
-        let Ok(source) = std::fs::read(root.join(file)) else { continue };
-        let tree = parse::parse(&source);
-        let imports = normalize::collect_imports(tree.root_node(), &source, file);
-        let occs = parse::extract_functions(&tree, &source, file);
-        let by_span: HashMap<(usize, usize), &parse::FnOccurrence> = occs
-            .iter()
-            .map(|o| ((o.root.byte_range().start, o.root.byte_range().end), o))
-            .collect();
-        for &i in &ids {
-            let span = symbols[i].span;
-            let Some(occ) = by_span.get(&span) else { continue };
-            let slice = &source[span.0..span.1];
-            let Ok(text) = std::str::from_utf8(slice) else {
-                // Invalid UTF-8: byte offsets and UTF-16 offsets diverge —
-                // serve the code as plain text rather than misaligned spans.
-                out[i].text = String::from_utf8_lossy(slice).into_owned();
-                continue;
-            };
-            let locals = normalize::collect_locals(occ.func, &source);
-            let mut syntax = Vec::new();
-            let mut idents = Vec::new();
-            walk_syntax(
-                occ.root, &source, span.0 as u32, &locals, &imports, false,
-                &mut syntax, &mut idents,
-            );
-            out[i] = RawSource {
-                text: text.to_string(),
-                syntax,
-                idents,
-                norm: normalize::normalize(occ.root, occ.func, &source, &imports).tree,
-            };
-        }
+    // Per-file work is independent (each file's parse feeds only its own
+    // symbols' disjoint output slots), so it fans out across files —
+    // mirrors scan.rs's own per-file rayon fan-out. Output is unaffected by
+    // which file finishes first: every slot is written exactly once, keyed
+    // by symbol id, never read by another file's iteration.
+    let updates: Vec<(usize, RawSource)> = by_file
+        .into_par_iter()
+        .flat_map(|(file, ids)| {
+            let Ok(source) = std::fs::read(root.join(file)) else { return Vec::new() };
+            let tree = parse::parse(&source);
+            let imports = normalize::collect_imports(tree.root_node(), &source, file);
+            let occs = parse::extract_functions(&tree, &source, file);
+            let by_span: HashMap<(usize, usize), &parse::FnOccurrence> = occs
+                .iter()
+                .map(|o| ((o.root.byte_range().start, o.root.byte_range().end), o))
+                .collect();
+            let mut local = Vec::new();
+            for i in ids {
+                let span = symbols[i].span;
+                let Some(occ) = by_span.get(&span) else { continue };
+                let slice = &source[span.0..span.1];
+                let Ok(text) = std::str::from_utf8(slice) else {
+                    // Invalid UTF-8: byte offsets and UTF-16 offsets diverge —
+                    // serve the code as plain text rather than misaligned spans.
+                    let mut rs = empty_raw();
+                    rs.text = String::from_utf8_lossy(slice).into_owned();
+                    local.push((i, rs));
+                    continue;
+                };
+                let locals = normalize::collect_locals(occ.func, &source);
+                let mut syntax = Vec::new();
+                let mut idents = Vec::new();
+                walk_syntax(
+                    occ.root, &source, span.0 as u32, &locals, &imports, false,
+                    &mut syntax, &mut idents,
+                );
+                local.push((
+                    i,
+                    RawSource {
+                        text: text.to_string(),
+                        syntax,
+                        idents,
+                        norm: normalize::normalize(occ.root, occ.func, &source, &imports).tree,
+                    },
+                ));
+            }
+            local
+        })
+        .collect();
+    for (i, rs) in updates {
+        out[i] = rs;
     }
     out
 }
