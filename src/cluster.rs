@@ -3,6 +3,7 @@
 
 use crate::fingerprint::{cosine_with_norms, norm_sq, MINHASH_FNS};
 use crate::types::SymbolPrint;
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use xxhash_rust::xxh3::xxh3_64;
 
@@ -141,40 +142,46 @@ pub fn shape_clusters(symbols: &[SymbolPrint], theta_clone: f32) -> ShapeCluster
         }
     }
 
-    let mut oversized = 0usize;
-    let mut candidate_pairs = 0usize;
-    let mut survived_guards = 0usize;
-    let mut seen: HashSet<(u32, u32)> = HashSet::new();
-    let mut cands: Vec<(f32, u32, u32)> = Vec::new();
-    for members in buckets.values() {
-        if members.len() < 2 {
-            continue;
-        }
-        if members.len() > MAX_BUCKET {
-            oversized += 1;
-            continue;
-        }
-        for (ai, &a) in members.iter().enumerate() {
-            for &b in &members[ai + 1..] {
-                let pair = (a.min(b), a.max(b));
-                if !seen.insert(pair) {
-                    continue;
-                }
-                candidate_pairs += 1;
-                let (sa, sb) = (&symbols[a as usize], &symbols[b as usize]);
-                let ratio = sa.node_count.min(sb.node_count) as f32
-                    / sa.node_count.max(sb.node_count) as f32;
-                if ratio < MIN_SIZE_RATIO || nested(sa, sb) {
-                    continue;
-                }
-                survived_guards += 1;
-                let c = cosine_with_norms(&sa.wl, &sb.wl, wl_norm_sq[a as usize], wl_norm_sq[b as usize]);
-                if c >= theta_clone {
-                    cands.push((c, pair.0, pair.1));
-                }
+    // Candidate generation runs in two order-free phases so it can fan out
+    // over rayon: (1) every bucket's pairs, deduped by sort+dedup rather than
+    // a shared `seen` set — a pure function of the pair *set*, not of which
+    // bucket a thread reached first; (2) each unique pair's guard checks and
+    // cosine, a pure function of the pair alone. Neither phase's output
+    // order matters because `cands` gets a full stable sort (below,
+    // unchanged) before the sequential best-first merge ever reads it — that
+    // merge, and only that merge, is where processing order is load-bearing.
+    let bucket_lists: Vec<&Vec<u32>> = buckets.values().collect();
+    let oversized = bucket_lists.iter().filter(|m| m.len() > MAX_BUCKET).count();
+    let mut unique_pairs: Vec<(u32, u32)> = bucket_lists
+        .par_iter()
+        .filter(|m| m.len() >= 2 && m.len() <= MAX_BUCKET)
+        .flat_map_iter(|members| {
+            members.iter().enumerate().flat_map(move |(ai, &a)| {
+                members[ai + 1..]
+                    .iter()
+                    .map(move |&b| (a.min(b), a.max(b)))
+            })
+        })
+        .collect();
+    unique_pairs.par_sort_unstable();
+    unique_pairs.dedup();
+    let candidate_pairs = unique_pairs.len();
+
+    let scored: Vec<(bool, Option<(f32, u32, u32)>)> = unique_pairs
+        .par_iter()
+        .map(|&(a, b)| {
+            let (sa, sb) = (&symbols[a as usize], &symbols[b as usize]);
+            let ratio = sa.node_count.min(sb.node_count) as f32
+                / sa.node_count.max(sb.node_count) as f32;
+            if ratio < MIN_SIZE_RATIO || nested(sa, sb) {
+                return (false, None);
             }
-        }
-    }
+            let c = cosine_with_norms(&sa.wl, &sb.wl, wl_norm_sq[a as usize], wl_norm_sq[b as usize]);
+            (true, (c >= theta_clone).then_some((c, a, b)))
+        })
+        .collect();
+    let survived_guards = scored.iter().filter(|(g, _)| *g).count();
+    let mut cands: Vec<(f32, u32, u32)> = scored.into_iter().filter_map(|(_, s)| s).collect();
 
     // Best-first merging with representative check. Candidates are collected
     // by iterating LSH buckets (a HashMap), so insertion order varies between
@@ -338,27 +345,36 @@ impl VocabIndex {
     /// Candidate pairs sharing at least one discriminating term, with their
     /// exact vocabulary cosine ≥ theta_b.
     pub fn similar_pairs(&self, theta_b: f32) -> Vec<(u32, u32, f32)> {
-        let mut seen: HashSet<(u32, u32)> = HashSet::new();
-        let mut out = Vec::new();
-        for members in self.postings.values() {
-            for (ai, &a) in members.iter().enumerate() {
-                for &b in &members[ai + 1..] {
-                    let pair = (a.min(b), a.max(b));
-                    if !seen.insert(pair) {
-                        continue;
-                    }
-                    let c = cosine_with_norms(
-                        &self.vecs[pair.0 as usize],
-                        &self.vecs[pair.1 as usize],
-                        self.norm_sq[pair.0 as usize],
-                        self.norm_sq[pair.1 as usize],
-                    );
-                    if c >= theta_b {
-                        out.push((pair.0, pair.1, c));
-                    }
-                }
-            }
-        }
+        // Same two-phase order-free shape as `shape_clusters`'s candidate
+        // loop (cluster.rs, above): dedup by sort instead of a shared `seen`
+        // set, then score each unique pair in parallel. `competing()`
+        // (queries.rs) consumes this via its own full sort / total-order
+        // max, so this output's order was never load-bearing downstream.
+        let posting_lists: Vec<&Vec<u32>> = self.postings.values().collect();
+        let mut unique_pairs: Vec<(u32, u32)> = posting_lists
+            .par_iter()
+            .flat_map_iter(|members| {
+                members.iter().enumerate().flat_map(move |(ai, &a)| {
+                    members[ai + 1..]
+                        .iter()
+                        .map(move |&b| (a.min(b), a.max(b)))
+                })
+            })
+            .collect();
+        unique_pairs.par_sort_unstable();
+        unique_pairs.dedup();
+        let out: Vec<(u32, u32, f32)> = unique_pairs
+            .par_iter()
+            .filter_map(|&(a, b)| {
+                let c = cosine_with_norms(
+                    &self.vecs[a as usize],
+                    &self.vecs[b as usize],
+                    self.norm_sq[a as usize],
+                    self.norm_sq[b as usize],
+                );
+                (c >= theta_b).then_some((a, b, c))
+            })
+            .collect();
         out
     }
 

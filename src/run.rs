@@ -45,19 +45,36 @@ pub struct Analysis {
 pub fn analyze(root: &Path, cfg: &Config) -> Analysis {
     let scanned = scan::scan_repo(root, cfg);
 
-    let t = Instant::now();
-    let mut shapes = cluster::shape_clusters(&scanned.symbols, cfg.theta_clone);
-    let shape = t.elapsed();
+    // shape_clusters and vocab_index each read only `scanned.symbols`
+    // immutably and write no shared state (Channel A and Channel B are
+    // independent projections, DESIGN.md §2), so running them concurrently
+    // cannot change either's output — the same guarantee family.rs's
+    // `theta_edges` already relies on for its own rayon fan-out.
+    let ((mut shapes, shape), (vocab, t_vocab)) = rayon::join(
+        || {
+            let t = Instant::now();
+            let r = cluster::shape_clusters(&scanned.symbols, cfg.theta_clone);
+            (r, t.elapsed())
+        },
+        || {
+            let t = Instant::now();
+            let r = cluster::vocab_index(&scanned.symbols);
+            (r, t.elapsed())
+        },
+    );
 
     let t = Instant::now();
     let repeated = queries::repeated(&scanned.symbols, &mut shapes);
     let t_repeated = t.elapsed();
 
-    // Vocab feeds both the family coherence gate and the competing query.
-    let t = Instant::now();
-    let vocab = cluster::vocab_index(&scanned.symbols);
-    let t_vocab = t.elapsed();
-
+    // family::assemble and callrel::build are also mutually independent
+    // (callrel::build reads only `scanned.symbols`), but measured: pairing
+    // them via rayon::join bought nothing (callrel::build is ~3ms — the
+    // wrapper's own internal `theta_edges` rayon fan-out is already the
+    // heavy work) and cost real time — family assembly's own phase slowed
+    // ~30-40% under this box's load, apparently from an outer rayon::join
+    // contending with the inner one for worker threads. Not worth it; left
+    // sequential.
     let t = Instant::now();
     let families = family::assemble(
         &scanned.symbols,
