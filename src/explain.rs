@@ -516,6 +516,94 @@ pub fn indegree(symbols: &[SymbolPrint]) -> Vec<u32> {
     indeg
 }
 
+/// Directed direct-call adjacency over the whole corpus, `is_real_edge`-
+/// gated (TKI-72): `out[i]` are the symbols `i` calls directly, exactly the
+/// edges `card`'s callers/callees pass lists — the map's "calls" channel
+/// and the panel on the same screen must give one answer to "who calls
+/// this" (the same contract `indegree`'s doc states for the entry tag).
+/// Unlike `indegree`, test symbols keep their edges: the card lists them
+/// and the map draws them. Restated as an indexed pass because the per-
+/// target O(n·calls) loop in `card` is fine for one card but not for a
+/// whole-corpus channel. Each list is sorted ascending and deduped, so the
+/// output is a pure, byte-stable function of the scan.
+pub fn call_edges(symbols: &[SymbolPrint]) -> Vec<Vec<u32>> {
+    let name_counts = base_name_counts(symbols);
+    let mut by_name: HashMap<&str, Vec<u32>> = HashMap::new();
+    let mut class_init: HashMap<&str, Vec<u32>> = HashMap::new();
+    let mut by_name_file: HashMap<(&str, &str), Vec<u32>> = HashMap::new();
+    let mut class_init_file: HashMap<(&str, &str), Vec<u32>> = HashMap::new();
+    let mut module_files: HashMap<String, Vec<&str>> = HashMap::new();
+    let mut seen_files: HashSet<&str> = HashSet::new();
+
+    for (i, s) in symbols.iter().enumerate() {
+        let file = s.sym.file.as_str();
+        if seen_files.insert(file) {
+            let comps = module_components(file);
+            for start in 0..comps.len() {
+                module_files.entry(comps[start..].join(".")).or_default().push(file);
+            }
+        }
+        let bn = base_name(&s.sym.qname);
+        // dunder names never bind by name (`is_dunder`, mirrored from
+        // `call_targets`); constructors still bind via the class-name maps
+        if !is_dunder(bn) {
+            by_name.entry(bn).or_default().push(i as u32);
+            by_name_file.entry((file, bn)).or_default().push(i as u32);
+        }
+        if let Some(class) = class_of_init(&s.sym.qname) {
+            class_init.entry(class).or_default().push(i as u32);
+            class_init_file.entry((file, class)).or_default().push(i as u32);
+        }
+    }
+
+    let mut out: Vec<Vec<u32>> = vec![Vec::new(); symbols.len()];
+    for (i, s) in symbols.iter().enumerate() {
+        let file = s.sym.file.as_str();
+        let mut targets: HashSet<u32> = HashSet::new();
+        for c in &s.calls {
+            let base = c.base.as_str();
+            match &c.module {
+                None => {
+                    // Same-file candidates always count; cross-file
+                    // unresolved only when corpus-unique AND not ambient —
+                    // the `is_real_edge` gates, in index form.
+                    if let Some(t) = by_name_file.get(&(file, base)) {
+                        targets.extend(t.iter().copied());
+                    }
+                    if let Some(t) = class_init_file.get(&(file, base)) {
+                        targets.extend(t.iter().copied());
+                    }
+                    if name_counts.get(base).copied().unwrap_or(0) < 2 && !is_ambient_name(base) {
+                        if let Some(t) = by_name.get(base) {
+                            targets.extend(t.iter().copied());
+                        }
+                        if let Some(t) = class_init.get(base) {
+                            targets.extend(t.iter().copied());
+                        }
+                    }
+                }
+                Some(ModuleRef::Absolute(m)) => {
+                    if let Some(files) = module_files.get(m.as_str()) {
+                        for f in files {
+                            if let Some(t) = by_name_file.get(&(*f, base)) {
+                                targets.extend(t.iter().copied());
+                            }
+                            if let Some(t) = class_init_file.get(&(*f, base)) {
+                                targets.extend(t.iter().copied());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        targets.remove(&(i as u32));
+        let mut v: Vec<u32> = targets.into_iter().collect();
+        v.sort_unstable();
+        out[i] = v;
+    }
+    out
+}
+
 /// Whether `target` is its directory's "entry" — the highest import-aware
 /// in-degree member among the directory's non-test symbols (R&D archive spike/orient's
 /// salvaged signal; tie-break ported verbatim: higher `node_count`, then
@@ -925,4 +1013,160 @@ fn render_card(analysis: &Analysis, cfg: &Config, target: usize) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::SymbolRef;
+
+    /// A base-name (unresolvable) call (mirrors `callrel::tests::call` —
+    /// each module keeps its own copy, per this codebase's precedent).
+    fn call(base: &str) -> Call {
+        Call { base: base.into(), module: None }
+    }
+
+    fn mcall(base: &str, module: &str) -> Call {
+        Call { base: base.into(), module: Some(ModuleRef::Absolute(module.into())) }
+    }
+
+    fn sym_at(file: &str, qname: &str, calls: HashSet<Call>) -> SymbolPrint {
+        SymbolPrint {
+            sym: SymbolRef { file: file.into(), qname: qname.into(), line: 1 },
+            span: (0, 0),
+            node_count: 0,
+            merkle_root: 0,
+            wl: Vec::new(),
+            minhash: Vec::new(),
+            vocab_tf: HashMap::new(),
+            calls,
+            is_test: false,
+            dating: None,
+        }
+    }
+
+    fn sym(file: &str, qname: &str, calls: &[&str]) -> SymbolPrint {
+        sym_at(file, qname, calls.iter().map(|s| call(s)).collect())
+    }
+
+    // ── call_edges (TKI-72): the map channel's adjacency must reproduce
+    // the card's own `is_real_edge` semantics, indexed ──
+
+    #[test]
+    fn call_edges_are_directed() {
+        let symbols = vec![
+            sym("a.py", "fetch_wrap", &["fetch"]),
+            sym("a.py", "fetch", &[]),
+        ];
+        let out = call_edges(&symbols);
+        assert_eq!(out[0], vec![1], "caller gets the out-edge");
+        assert!(out[1].is_empty(), "callee gets none — edges are directed");
+    }
+
+    #[test]
+    fn cross_file_ambient_name_makes_no_edge() {
+        // `logger.error(...)` in another file must not become an edge to a
+        // corpus symbol named `error` (the CurlParser.error regression).
+        let symbols = vec![
+            sym("a.py", "parse", &["error"]),
+            sym("b.py", "Handler.error", &[]),
+        ];
+        let out = call_edges(&symbols);
+        assert!(out[0].is_empty(), "ambient base names never bind cross-file");
+    }
+
+    #[test]
+    fn cross_file_non_unique_name_makes_no_edge() {
+        let symbols = vec![
+            sym("a.py", "caller", &["run"]),
+            sym("b.py", "run", &[]),
+            sym("c.py", "Job.run", &[]),
+        ];
+        let out = call_edges(&symbols);
+        assert!(out[0].is_empty(), "two candidate `run`s: unresolved cross-file is noise");
+    }
+
+    #[test]
+    fn same_file_call_stays_ungated() {
+        // Same base name is non-unique corpus-wide, but an unqualified call
+        // resolves in its own file first — the same-file edge must survive.
+        let symbols = vec![
+            sym("a.py", "caller", &["run"]),
+            sym("a.py", "run", &[]),
+            sym("b.py", "run", &[]),
+        ];
+        let out = call_edges(&symbols);
+        assert_eq!(out[0], vec![1], "own-file candidate binds; the cross-file one doesn't");
+    }
+
+    #[test]
+    fn import_resolved_call_reaches_that_module_only() {
+        let symbols = vec![
+            sym_at("app.py", "connection", [mcall("connect", "appdb.engine")].into_iter().collect()),
+            sym_at("appdb/engine.py", "connect", HashSet::new()),
+            sym_at("other/pkg.py", "connect", HashSet::new()),
+        ];
+        let out = call_edges(&symbols);
+        assert_eq!(out[0], vec![1], "module-resolved call binds its module's symbol only");
+    }
+
+    #[test]
+    fn dunder_call_never_binds_by_name() {
+        let symbols = vec![
+            sym("a.py", "Child.__init__", &["__init__"]), // super().__init__()
+            sym("a.py", "Base.__init__", &[]),
+        ];
+        let out = call_edges(&symbols);
+        assert!(out[0].is_empty(), "super().__init__() must not bind same-file __init__s");
+    }
+
+    #[test]
+    fn constructor_call_binds_the_class_init() {
+        let symbols = vec![
+            sym("a.py", "build_widget", &["Widget"]),
+            sym("a.py", "Widget.__init__", &[]),
+        ];
+        let out = call_edges(&symbols);
+        assert_eq!(out[0], vec![1], "ClassName(...) reaches ClassName.__init__");
+    }
+
+    #[test]
+    fn recursion_yields_no_self_edge_and_lists_sort() {
+        let symbols = vec![
+            sym("a.py", "walk", &["walk", "beta_step", "alpha_step"]),
+            sym("a.py", "beta_step", &[]),
+            sym("a.py", "alpha_step", &[]),
+        ];
+        let out = call_edges(&symbols);
+        assert_eq!(out[0], vec![1, 2], "no self-edge; ids sorted ascending");
+    }
+
+    #[test]
+    fn call_edges_match_the_cards_is_real_edge_pass() {
+        // The channel and the card must be the same relation: brute-force
+        // `is_real_edge` over every ordered pair equals the indexed pass.
+        let symbols = vec![
+            sym("a.py", "caller", &["run", "error", "helper"]),
+            sym("a.py", "helper", &["run"]),
+            sym("b.py", "run", &[]),
+            sym("c.py", "Job.run", &[]),
+            sym("c.py", "Handler.error", &[]),
+            sym_at("app.py", "connection", [mcall("connect", "appdb.engine")].into_iter().collect()),
+            sym_at("appdb/engine.py", "connect", HashSet::new()),
+        ];
+        let out = call_edges(&symbols);
+        let name_counts = base_name_counts(&symbols);
+        for (i, s) in symbols.iter().enumerate() {
+            let brute: Vec<u32> = (0..symbols.len())
+                .filter(|&j| j != i)
+                .filter(|&j| {
+                    s.calls.iter().any(|c| {
+                        is_real_edge(&s.sym.file, &symbols[j], c, &name_counts)
+                    })
+                })
+                .map(|j| j as u32)
+                .collect();
+            assert_eq!(out[i], brute, "indexed pass diverges from the card at {i}");
+        }
+    }
 }

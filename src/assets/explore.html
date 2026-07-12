@@ -17,6 +17,7 @@
   --sel: #e8edf2;
   --err: #d3766f;
   --link: #e3b341;
+  --call: #dba25e;
 }
 @media (prefers-color-scheme: light) {
   :root {
@@ -29,6 +30,7 @@
     --sel: #1c2127;
     --err: #a04b43;
     --link: #9a6700;
+    --call: #96601c;
   }
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -108,6 +110,9 @@ body {
   max-width: 190px;
 }
 #topbar input[type=checkbox] { accent-color: var(--accent); }
+/* calls toggle (TKI-72): ≥24px hit target (#19) without changing the bar's
+   height — padding expands the hit box, the negative margin refunds it */
+#callsLbl { padding: 6px 4px; margin: -6px -4px; }
 #views { display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
 #views button {
   background: var(--panel);
@@ -466,6 +471,7 @@ footer {
     <label>y <select id="ay"></select></label>
   </span>
   <label><input type="checkbox" id="tests"> tests</label>
+  <label id="callsLbl" title="show static call edges for the selection and pinned cards — name-resolved direct calls, no dynamic dispatch"><input type="checkbox" id="calls"> calls</label>
   <label title="zooming deep over a cluster opens it; zooming far out climbs back — off: labels and path segments drill as always"><input type="checkbox" id="zoomdrill"> zoom drills</label>
 </header>
 <div id="chips"></div>
@@ -512,6 +518,8 @@ let META = {pca_var: [], labels: {prod: [], full: []}}; // /api/meta
 let radii = [];             // px per symbol
 let dirColor = {};          // top-level dir -> color
 let showTests = BOOT.tests;
+let showCalls = false;      // the calls channel toggle (TKI-72)
+let callersOf = [];         // per-symbol incoming call ids — S[].calls inverted once at boot
 let focusDirs = new Set();  // legend chips; empty = all
 let branchFocus = false;    // branch chip: ring branch-new, fade the rest
 let selected = -1;          // selected symbol id == the anchor
@@ -705,6 +713,7 @@ function draw() {
   const dimInk = cssVar("--dim"), selInk = cssVar("--sel"), accent = cssVar("--accent");
   const linkInk = cssVar("--link");
   const focus = focusDirs.size > 0;
+  callAmbigDrawn = false; // recomputed by this frame's call-edge passes
 
   // time view: date gridlines under the points
   if (mode === "time" && isFinite(ext.x[0]) && ext.x[1] > ext.x[0]) {
@@ -731,6 +740,10 @@ function draw() {
     drawDirLabels(W, H, dimInk);
     if (hovered >= 0 && hovered !== selected && visible(S[hovered])) drawEdges(hovered, 0.25, accent);
     if (selected >= 0 && visible(S[selected])) drawEdges(selected, 0.6, accent);
+    // calls channel (TKI-72): the selection's directed call edges —
+    // structure in --call, never confusable with the accent similarity
+    // edges above; selection-scoped, never all-pairs at repo zoom
+    if (showCalls && selected >= 0 && visible(S[selected])) drawCallEdges(cssVar("--call"));
     if (edgeHover && visible(S[edgeHover.a]) && visible(S[edgeHover.b])) {
       const [x0, y0] = screenXY(edgeHover.a);
       const [x1, y1] = screenXY(edgeHover.b);
@@ -867,7 +880,16 @@ function draw() {
     let cap = `map · ${BOOT.k}-nearest-neighbor layout · cosine over embeddings`;
     if (drill) cap += ` · drill: ${drill.path} · ${drill.ids.length} of ${BOOT.count} symbols`;
     if (selected >= 0 && visible(S[selected])) cap += " · edges: selection's layout neighbors";
-    ctx.fillText(cap, PAD, H - 10);
+    // the calls channel's legend line (#28): what the arrows are — and are
+    // not — including the honest cap when the server dropped ids (#24)
+    if (showCalls) {
+      cap += " · → calls: name-resolved static calls, direct only";
+      if (callAmbigDrawn) cap += " · dashed = one of N same-name candidates";
+      if (selected >= 0 && visible(S[selected]) && S[selected].calls_over) {
+        cap += ` · ${S[selected].calls_over} more callees not drawn`;
+      }
+    }
+    drawCaption(cap, W, H);
   } else if (mode === "anchor") {
     const a = selected >= 0 ? S[selected].qname : "anchor";
     ctx.fillText(`x · structure sim → ${a} (A) · ${fmtVal(axisX, ext.x[0])} … ${fmtVal(axisX, ext.x[1])}`, PAD, H - 10);
@@ -879,6 +901,27 @@ function draw() {
     ctx.fillText(`x · ${axisLabel(axisX)} · ${fmtVal(axisX, ext.x[0])} … ${fmtVal(axisX, ext.x[1])}`, PAD, H - 10);
     ctx.fillText(`y · ${axisLabel(axisY)} · ${fmtVal(axisY, ext.y[0])} … ${fmtVal(axisY, ext.y[1])}`, PAD, 16);
   }
+}
+
+// The map caption, clip-proof (TKI-72): the honesty clauses ride at the
+// END of the line, so an overflow silently swallows exactly the text that
+// exists to keep the display honest (#28, #24). A caption wider than the
+// stage wraps once at a "·" boundary — two lines, same ink, clauses never
+// dropped, font never shrunk. A caption that fits renders exactly as the
+// single line always did.
+function drawCaption(cap, W, H) {
+  const max = W - 2 * PAD;
+  if (ctx.measureText(cap).width <= max) {
+    ctx.fillText(cap, PAD, H - 10);
+    return;
+  }
+  const parts = cap.split(" · ");
+  let first = parts.shift();
+  while (parts.length && ctx.measureText(`${first} · ${parts[0]}`).width <= max) {
+    first += ` · ${parts.shift()}`;
+  }
+  ctx.fillText(first, PAD, H - 22);
+  ctx.fillText(parts.join(" · "), PAD, H - 10);
 }
 
 // The selection's layout edges — the mutual-kNN springs that put it where
@@ -900,6 +943,97 @@ function drawEdges(i, alpha, ink) {
   ctx.lineWidth = 1;
   ctx.stroke();
   ctx.globalAlpha = 1;
+}
+
+/* ── the calls channel on the map (TKI-72) ──
+   Directed, is_real_edge-gated static call edges — the same edge set the
+   panel's callers/callees lists show, so map and panel can never disagree
+   on one screen. Drawn ONLY for the selection (both directions) here and
+   between pinned boards (drawBoards); the encoding is stated in the map
+   caption and the toggle's title, and hover names each edge without a
+   fetch (#1, #17, #28). */
+// The join key a callee is reached BY — the class segment for a
+// constructor edge (`Widget.__init__` is reached by a call to `Widget`),
+// the base name otherwise. Mirrors call_edges' by_name/class_init keying,
+// so same-key siblings are exactly the candidates one call site fans out
+// to when the resolver can't pick.
+function callKey(qname) {
+  const parts = qname.split(".");
+  const last = parts[parts.length - 1];
+  return last === "__init__" && parts.length >= 2 ? parts[parts.length - 2] : last;
+}
+// How many of `caller`'s callees share callee `j`'s join key. ≥2 means
+// this edge is one of N same-name candidates, not a resolved single call
+// — drawn dashed and said out loud (#28, #24), never as confident
+// structure. Pure client state over S[].calls; no fetch.
+function callFanout(caller, j) {
+  const key = callKey(S[j].qname);
+  let n = 0;
+  for (const t of S[caller].calls) if (callKey(S[t].qname) === key) n++;
+  return n;
+}
+let callAmbigDrawn = false; // any dashed call edge this frame → caption clause
+
+// One arrow from (x0,y0) toward dot b: shortened to b's rim, head at the
+// callee end — direction IS the encoding (caller → callee). A dashed
+// shaft marks an ambiguous same-name candidate (head stays solid: the
+// direction is certain, the binding is not).
+function callArrow(x0, y0, x1, y1, rb, dashed) {
+  const dx = x1 - x0, dy = y1 - y0;
+  const len = Math.hypot(dx, dy);
+  if (len < rb + 10) return; // too short for a readable head
+  const ux = dx / len, uy = dy / len;
+  const ex = x1 - ux * (rb + 2), ey = y1 - uy * (rb + 2);
+  if (dashed) ctx.setLineDash([4, 3]);
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(ex, ey);
+  ctx.stroke();
+  if (dashed) ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.moveTo(ex, ey);
+  ctx.lineTo(ex - ux * 6 - uy * 3, ey - uy * 6 + ux * 3);
+  ctx.lineTo(ex - ux * 6 + uy * 3, ey - uy * 6 - ux * 3);
+  ctx.closePath();
+  ctx.fill();
+}
+function drawCallEdges(ink) {
+  ctx.strokeStyle = ink;
+  ctx.fillStyle = ink;
+  const one = (a, b) => {
+    if (!visible(S[a]) || !visible(S[b])) return;
+    const hot = edgeHover && edgeHover.call && edgeHover.a === a && edgeHover.b === b;
+    ctx.globalAlpha = hot ? 0.95 : 0.6;
+    ctx.lineWidth = hot ? 1.5 : 1;
+    const [x0, y0] = screenXY(a);
+    const [x1, y1] = screenXY(b);
+    const ambig = callFanout(a, b) >= 2;
+    if (ambig) callAmbigDrawn = true;
+    callArrow(x0, y0, x1, y1, radii[b], ambig);
+  };
+  for (const j of S[selected].calls) one(selected, j);
+  for (const j of callersOf[selected]) one(j, selected);
+  ctx.globalAlpha = 1;
+  ctx.lineWidth = 1;
+}
+// The selection's call edge nearest the cursor (mirrors nearestEdge's ≤6px
+// band), or null. Only the selection's own in/out edges are tested.
+function nearestCallEdge(mx, my) {
+  let best = null, bestD = 6;
+  const test = (a, b) => {
+    if (!visible(S[a]) || !visible(S[b])) return;
+    const [x0, y0] = screenXY(a);
+    const [x1, y1] = screenXY(b);
+    const dx = x1 - x0, dy = y1 - y0;
+    const len2 = dx * dx + dy * dy;
+    if (!len2) return;
+    const t = Math.max(0, Math.min(1, ((mx - x0) * dx + (my - y0) * dy) / len2));
+    const d = Math.hypot(mx - (x0 + t * dx), my - (y0 + t * dy));
+    if (d < bestD) { bestD = d; best = {a, b, call: true}; }
+  };
+  for (const j of S[selected].calls) test(selected, j);
+  for (const j of callersOf[selected]) test(j, selected);
+  return best;
 }
 
 // Directory labels at island centroids (server-gated: only dirs whose
@@ -1128,6 +1262,10 @@ function footer() {
   };
   dateNote(axisX, "x", parked.x);
   dateNote(axisY, "y", parked.y);
+  // calls on, nothing to draw yet: say what would make edges appear (#14)
+  if (showCalls && mode === "map" && selected < 0 && !boards.some(b => !b.min)) {
+    notes.push("calls: select or pin a symbol to see its call edges");
+  }
   if (mode === "axes") {
     notes.push("PCA components are directions of greatest variance, ranked");
   }
@@ -1164,7 +1302,9 @@ function nearestEdge(i, mx, my) {
   }
   return best;
 }
-function sameEdge(a, b) { return (!a && !b) || (a && b && a.a === b.a && a.b === b.b); }
+function sameEdge(a, b) {
+  return (!a && !b) || (a && b && a.a === b.a && a.b === b.b && !a.call === !b.call);
+}
 
 // Fetch-once cache for /api/edge — the shared Channel-B vocabulary that a
 // layout edge is made of. Refreshes the tooltip and the board connector
@@ -1203,6 +1343,10 @@ function hoverUpdate() {
     } else if (h < 0 && !lb && !conn) {
       const j = nearestEdge(selected, mouse.x, mouse.y);
       if (j >= 0) edge = {a: selected, b: j};
+      // calls channel (TKI-72): a call arrow is hoverable identity too —
+      // the similarity edge wins a tie (it was there first, and both tips
+      // name the same pair)
+      if (!edge && showCalls) edge = nearestCallEdge(mouse.x, mouse.y);
     }
   }
   const changed = h !== hovered || !sameEdge(edge, edgeHover) ||
@@ -1212,7 +1356,7 @@ function hoverUpdate() {
   hoverLabel = lb;
   connHover = conn;
   canvas.style.cursor = h >= 0 || conn ? "pointer" : lb ? "zoom-in" : "default";
-  if (edge) ensureEdgeTerms(edge);
+  if (edge && !edge.call) ensureEdgeTerms(edge); // call edges fetch nothing (#1)
   peekUpdate(h);
   tooltip();
   if (changed) {
@@ -1221,6 +1365,14 @@ function hoverUpdate() {
   }
 }
 
+// A call edge's honest one-liner: the encoding, plus "one of N" when the
+// resolver kept N same-name candidates instead of picking (edge.a is the
+// caller for every call-flavored edge/connector).
+function callEdgeHint(edge) {
+  const fan = callFanout(edge.a, edge.b);
+  return "name-resolved static call · direct only"
+    + (fan >= 2 ? ` · one of ${fan} same-name candidates` : "");
+}
 function tipLine(cls, text) {
   const d = document.createElement("div");
   d.className = cls;
@@ -1237,12 +1389,36 @@ function tooltip() {
   if (!mouse || hovered >= 0) { tip.hidden = true; return; }
   tip.textContent = "";
   if (connHover) {
-    tip.appendChild(tipLine("t-name", `${S[connHover.a].qname} — ${S[connHover.b].qname}`));
-    tip.appendChild(tipLine("t-terms", `shared: ${edgeTermText(connHover)}`));
-    tip.appendChild(tipLine("t-hint", "click to compare side-by-side"));
+    if (connHover.call) {
+      // calls connector (TKI-72): direction + encoding, no number, no fetch
+      tip.appendChild(tipLine("t-name", `${S[connHover.a].qname} → ${S[connHover.b].qname}`));
+      tip.appendChild(tipLine("t-hint", callEdgeHint(connHover)));
+      tip.appendChild(tipLine("t-hint", "click to compare side-by-side"));
+    } else {
+      tip.appendChild(tipLine("t-name", `${S[connHover.a].qname} — ${S[connHover.b].qname}`));
+      tip.appendChild(tipLine("t-terms", `shared: ${edgeTermText(connHover)}`));
+      tip.appendChild(tipLine("t-hint", "click to compare side-by-side"));
+    }
   } else if (edgeHover) {
-    tip.appendChild(tipLine("t-name", `${S[edgeHover.a].qname} — ${S[edgeHover.b].qname}`));
-    tip.appendChild(tipLine("t-terms", `shared: ${edgeTermText(edgeHover)}`));
+    if (edgeHover.call) {
+      tip.appendChild(tipLine("t-name", `${S[edgeHover.a].qname} → ${S[edgeHover.b].qname}`));
+      tip.appendChild(tipLine("t-hint", callEdgeHint(edgeHover)));
+    } else {
+      tip.appendChild(tipLine("t-name", `${S[edgeHover.a].qname} — ${S[edgeHover.b].qname}`));
+      tip.appendChild(tipLine("t-terms", `shared: ${edgeTermText(edgeHover)}`));
+      // the same pair can also be a call edge (TKI-72): the layout edge
+      // wins the hover, but the call fact — and its same-name ambiguity —
+      // must not vanish under it (#28); arrow = direction vs the names above
+      if (showCalls) {
+        if (S[edgeHover.a].calls.includes(edgeHover.b)) {
+          tip.appendChild(tipLine("t-hint", "→ " + callEdgeHint(edgeHover)));
+        }
+        if (S[edgeHover.b].calls.includes(edgeHover.a)) {
+          tip.appendChild(tipLine("t-hint",
+            "← " + callEdgeHint({a: edgeHover.b, b: edgeHover.a})));
+        }
+      }
+    }
   } else if (hoverLabel) {
     tip.appendChild(tipLine("t-name", hoverLabel.path));
     tip.appendChild(tipLine("t-hint", `click to open ${hoverLabel.path}`));
@@ -1386,7 +1562,7 @@ function updatePeekTerms() {
   if (peekId < 0) return;
   const t = $("peek").querySelector(".t-terms");
   if (!t) return;
-  if (edgeHover && (edgeHover.a === peekId || edgeHover.b === peekId)) {
+  if (edgeHover && !edgeHover.call && (edgeHover.a === peekId || edgeHover.b === peekId)) {
     const other = edgeHover.a === peekId ? edgeHover.b : edgeHover.a;
     t.textContent = `shared with ${S[other].qname} — ${edgeTermText(edgeHover)}`;
     t.hidden = false;
@@ -1685,6 +1861,18 @@ function drawBoards(W, H, accent, dimInk) {
       drawConnSeg(rects.get(ids[i]), rects.get(ids[j]), lo, hi, accent, panel, false);
     }
   }
+  // calls channel (TKI-72): a direct call edge between two pinned cards
+  // draws its own DIRECTED connector, labeled "calls" — never merged with
+  // the vocabulary connector above (structure and similarity are different
+  // facts; when both exist the call line offsets aside)
+  if (showCalls) {
+    for (const a of ids) {
+      for (const b of ids) {
+        if (a === b || !S[a].calls.includes(b)) continue;
+        drawCallConnSeg(rects.get(a), rects.get(b), a, b, panel);
+      }
+    }
+  }
   // drag-to-connect: dashed provisional line; commit happens on release
   if (dragConn && rects.has(dragConn.from)) {
     const [x0, y0] = rectEdgePoint(rects.get(dragConn.from), dragConn.x, dragConn.y);
@@ -1738,6 +1926,54 @@ function drawConnSeg(ra, rb, lo, hi, accent, panel, ambient) {
     seg.lx1 = mx + tw / 2 + 4;
     seg.ly1 = my + 7;
   }
+  connSegs.push(seg);
+}
+
+// One DIRECTED call connector between two pinned card rects (TKI-72):
+// caller-edge → callee-edge in --call with an arrowhead and a "calls"
+// midpoint label — visibly not the accent vocabulary connector. When the
+// pair also carries a similarity connector, this one steps 8px aside so
+// neither line nor label occludes the other (a mutual-recursion pair's two
+// arrows land on opposite sides for the same reason). The seg joins
+// connSegs like every connector: hover names it, click compares (#17).
+function drawCallConnSeg(ra, rb, a, b, panel) {
+  const ink = cssVar("--call");
+  let [x0, y0] = rectEdgePoint(ra, rb.x + rb.w / 2, rb.y + rb.h / 2);
+  let [x1, y1] = rectEdgePoint(rb, ra.x + ra.w / 2, ra.y + ra.h / 2);
+  const lo = Math.min(a, b), hi = Math.max(a, b);
+  if (manualPairs.has(pairKey(lo, hi)) ||
+      neighborsOf(lo).includes(hi) || neighborsOf(hi).includes(lo)) {
+    const dx = x1 - x0, dy = y1 - y0;
+    const len = Math.hypot(dx, dy) || 1;
+    const ox = (-dy / len) * 8, oy = (dx / len) * 8;
+    x0 += ox; y0 += oy; x1 += ox; y1 += oy;
+  }
+  const hot = sameEdge(connHover, {a, b, call: true});
+  ctx.strokeStyle = ink;
+  ctx.fillStyle = ink;
+  ctx.globalAlpha = hot ? 0.95 : 0.6;
+  ctx.lineWidth = hot ? 1.5 : 1;
+  const ambig = callFanout(a, b) >= 2;
+  if (ambig) callAmbigDrawn = true;
+  callArrow(x0, y0, x1, y1, 0, ambig);
+  ctx.globalAlpha = 1;
+  ctx.lineWidth = 1;
+  const seg = {a, b, call: true, x0, y0, x1, y1, lx0: 0, ly0: 0, lx1: -1, ly1: -1};
+  const lab = "calls";
+  const tw = ctx.measureText(lab).width;
+  const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+  ctx.globalAlpha = 0.92;
+  ctx.fillStyle = panel;
+  ctx.fillRect(mx - tw / 2 - 4, my - 8, tw + 8, 15);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = ink;
+  ctx.textAlign = "center";
+  ctx.fillText(lab, mx, my + 3);
+  ctx.textAlign = "start";
+  seg.lx0 = mx - tw / 2 - 4;
+  seg.ly0 = my - 8;
+  seg.lx1 = mx + tw / 2 + 4;
+  seg.ly1 = my + 7;
   connSegs.push(seg);
 }
 
@@ -2730,6 +2966,11 @@ function buildChips() {
 function prep() {
   buildChips();
 
+  // calls channel (TKI-72): invert the shipped out-edge arrays once, so
+  // incoming edges render fetch-free like everything else on hover (#1)
+  callersOf = S.map(() => []);
+  for (const s of S) for (const j of s.calls) callersOf[j].push(s.id);
+
   // radius ∝ sqrt(nodes), mapped into [2, 7] px
   let lo = Infinity, hi = -Infinity;
   for (const s of S) {
@@ -2897,6 +3138,22 @@ function initControls() {
     zoomDrill = $("zoomdrill").checked;
     clearTimeout(adTimer);
     adTimer = 0; // toggling off abandons any pending crossing
+  });
+
+  // calls channel (TKI-72): persistent channel state like the tests
+  // toggle — never an Esc rung. Toggling off clears any call-flavored
+  // hover at once, even under a resting cursor (#39).
+  $("calls").addEventListener("change", () => {
+    showCalls = $("calls").checked;
+    if (!showCalls) {
+      if (edgeHover && edgeHover.call) edgeHover = null;
+      if (connHover && connHover.call) connHover = null;
+      // a resting cursor gets no mousemove, so the tip must re-render
+      // from the cleared state NOW, not on the next hover pass (#39)
+      tooltip();
+    }
+    footer();
+    scheduleDraw();
   });
 
   $("tests").addEventListener("change", () => {

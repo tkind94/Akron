@@ -226,6 +226,15 @@ the map while the row is hovered (a dashed halo with crosshair ticks,
 distinct from the selection/search/branch rings). A row whose symbol
 isn't drawn in the current scope says so on hover instead of highlighting
 anything; it never auto-pans or auto-drills.
+**Calls channel (TKI-72):** the `calls` toggle in the topbar overlays
+directed call arrows — name-resolved static calls, direct only, the same
+import-aware edge set the card's callers/callees lists show — for the
+selected symbol (both directions) and between pinned board cards (their
+connectors say "calls", distinct from the vocabulary-term labels). Arrows
+are structure, not similarity: a different color and an arrowhead, never
+confusable with the layout-neighbor edges, and never drawn all-pairs at
+repo zoom. Hovering an arrow names the pair and the encoding; dynamic
+dispatch (`handlers[name](...)`) stays invisible, exactly as J9 states.
 
 ## CLI-surface principles (binding)
 
