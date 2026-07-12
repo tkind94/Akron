@@ -1385,6 +1385,18 @@ function tooltip() {
     } else {
       tip.appendChild(tipLine("t-name", `${S[edgeHover.a].qname} — ${S[edgeHover.b].qname}`));
       tip.appendChild(tipLine("t-terms", `shared: ${edgeTermText(edgeHover)}`));
+      // the same pair can also be a call edge (TKI-72): the layout edge
+      // wins the hover, but the call fact — and its same-name ambiguity —
+      // must not vanish under it (#28); arrow = direction vs the names above
+      if (showCalls) {
+        if (S[edgeHover.a].calls.includes(edgeHover.b)) {
+          tip.appendChild(tipLine("t-hint", "→ " + callEdgeHint(edgeHover)));
+        }
+        if (S[edgeHover.b].calls.includes(edgeHover.a)) {
+          tip.appendChild(tipLine("t-hint",
+            "← " + callEdgeHint({a: edgeHover.b, b: edgeHover.a})));
+        }
+      }
     }
   } else if (hoverLabel) {
     tip.appendChild(tipLine("t-name", hoverLabel.path));
