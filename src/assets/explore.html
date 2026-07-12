@@ -156,7 +156,11 @@ main { display: grid; grid-template-columns: 1fr 340px; min-height: 0; position:
 /* the viewer needs room for code; the landing (guide) state keeps the
    original 340px so the map's first impression is untouched */
 main.hasSel { grid-template-columns: 1fr minmax(420px, 46%); }
-#stage { position: relative; min-width: 0; }
+/* overflow hidden (TKI-69): ambient LOD cards are world-anchored DOM and
+   can straddle the stage edge — clip them at the map boundary so they can
+   never paint over the panel, header, or legend. Pinned boards/peek/tip
+   are viewport-clamped already, so this changes nothing for them. */
+#stage { position: relative; min-width: 0; overflow: hidden; }
 #map { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 
 /* ── hover tooltip (TKI-66): identity at the cursor; never a hit target ── */
@@ -239,6 +243,12 @@ main.hasSel { grid-template-columns: 1fr minmax(420px, 46%); }
 .board pre.code { margin: 0; border: none; border-radius: 0; max-height: 240px; font-size: 11px; }
 .board.big pre.code { max-height: 60vh; }
 .board .bwait { color: var(--dim); padding: 6px 8px; }
+
+/* ── LOD cards (TKI-69): ambient world-scaled cards. Display only —
+   pointer-events: none, so a click passes through to the dot beneath,
+   which pins/selects exactly as before. Hover discloses, click commits. ── */
+.board.lod { z-index: 11; pointer-events: none; transform-origin: top left; opacity: 0.97; }
+.board.lod .bhead { cursor: default; }
 
 /* minimized boards dock as chips (soft cap: the oldest card yields) */
 #btray {
@@ -438,6 +448,7 @@ footer {
     <label>y <select id="ay"></select></label>
   </span>
   <label><input type="checkbox" id="tests"> tests</label>
+  <label title="zooming deep over a cluster opens it; zooming far out climbs back — off: labels and path segments drill as always"><input type="checkbox" id="zoomdrill"> zoom drills</label>
 </header>
 <div id="chips"></div>
 <main>
@@ -510,6 +521,18 @@ let peekId = -1;            // the peek card's symbol, or -1
 let peekWait = -1, peekDwellT = 0, peekHideT = 0;
 const BOARD_CAP = 6;
 const PEEK_DWELL = 300, PEEK_GRACE = 200, PEEK_LINES = 12;
+/* semantic zoom (TKI-69) */
+let spacing = null;          // per-symbol elbow room (plane units); null = recompute
+const lodPool = new Map();   // id -> {el, h} — LOD card DOM, reused across frames
+let lodShown = new Set();    // ids carrying a live LOD card this frame
+let lodWish = [];            // chip/card ids missing source, gathered per draw
+let lodTimer = 0;            // zoom-settle debounce before source fetches
+let lastView = {k: 0, tx: 0, ty: 0};
+let zoomDrill = false;       // auto-drill flag; manual drill is always on
+let adTimer = 0;             // committed-crossing settle timer
+const subCache = new Map();  // path -> /api/sublayout payload (deterministic)
+const LOD = {chipK: 2, chipCell: 60, cardK: 5, cardCell: 180, cardScale: 360,
+             cardCap: 16, inK: 8, outK: 0.4, settle: 250};
 let mode = "map";           // map | anchor | time | axes
 let axisX = "map_x", axisY = "map_y";
 let px, py;                 // Float64Array world coords in [0,1]
@@ -592,6 +615,7 @@ function layout() {
     px[i] = norm(vx[i], ext.x);
     py[i] = norm(vy[i], ext.y);
   }
+  spacing = null; // elbow room is a fact of this plane (TKI-69)
 }
 function extentOf(vals, axisId, which) {
   let lo = Infinity, hi = -Infinity;
@@ -758,11 +782,26 @@ function draw() {
     ctx.stroke();
   }
 
-  // board cards + connectors (TKI-68): placed from screenXY in this same
-  // rAF pass as the dots — one transform source of truth; leader lines
-  // and connectors can never lag or detach from their cards.
+  // semantic zoom (TKI-69) + board cards (TKI-68): everything below is
+  // placed from screenXY in this same rAF pass as the dots — one
+  // transform source of truth; lines can never lag or detach from cards.
   connSegs = [];
+  lodWish = [];
+  if (spacing === null && px) computeSpacing();
+  const lodRects = drawLodCards(W, H);
+  if (lodRects.size) drawLodConnectors(lodRects, accent);
+  drawChips(W, H, dimInk);
   if (boards.length) drawBoards(W, H, accent, dimInk);
+  // source fetches for chips/cards fire only after the view settles —
+  // zero fetches during the zoom/pan gesture itself (#39-adjacent; the
+  // same discipline as the peek dwell)
+  if (view.k !== lastView.k || view.tx !== lastView.tx || view.ty !== lastView.ty) {
+    lastView = {k: view.k, tx: view.tx, ty: view.ty};
+    clearTimeout(lodTimer);
+    lodTimer = lodWish.length ? setTimeout(drainLod, LOD.settle) : 0;
+  } else if (lodWish.length && !lodTimer) {
+    lodTimer = setTimeout(drainLod, LOD.settle);
+  }
 
   // captions: per view, real numbers only
   ctx.fillStyle = dimInk;
@@ -924,19 +963,24 @@ async function drillTo(path) {
   if (!path) {
     drill = null;
   } else {
-    let j;
-    try {
-      const r = await fetch(`/api/sublayout?path=${encodeURIComponent(path)}`);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      j = await r.json();
-    } catch (e) {
-      $("readout").textContent =
-        `drill failed — ${e instanceof TypeError ? "server unreachable" : e.message}`;
-      return;
+    // per-path cache (TKI-69): the server's answer is deterministic, so a
+    // revisited scope swaps in without a fetch — auto-drill can't stutter
+    let j = subCache.get(path);
+    if (!j) {
+      try {
+        const r = await fetch(`/api/sublayout?path=${encodeURIComponent(path)}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        j = await r.json();
+      } catch (e) {
+        $("readout").textContent =
+          `drill failed — ${e instanceof TypeError ? "server unreachable" : e.message}`;
+        return;
+      }
+      j.set = new Set(j.ids);
+      j.slot = new Map(j.ids.map((g, k) => [g, k]));
+      subCache.set(path, j);
     }
     if (seq !== drillSeq) return; // a newer drill is in flight
-    j.set = new Set(j.ids);
-    j.slot = new Map(j.ids.map((g, k) => [g, k]));
     drill = j;
   }
   focusDirs.clear();
@@ -1180,7 +1224,8 @@ function ensureSource(id) {
 function onSourceReady(id) {
   if (peekId === id) fillPeek(id);
   const b = boardFor(id);
-  if (b) { fillBoard(b); scheduleDraw(); }
+  if (b) fillBoard(b);
+  scheduleDraw(); // chips/LOD cards showing this id reconcile next frame
 }
 function lineCount(text) {
   let n = 1;
@@ -1300,7 +1345,9 @@ function hidePeek() {
 // leaving grace-hides against flicker; switching dots kills the old peek
 // at once (exactly one peek). #39: no orphaned transient state.
 function peekUpdate(h) {
-  const want = h >= 0 && !boardFor(h) ? h : -1; // a pinned card outranks its peek
+  // a pinned card — or an ambient LOD card already showing these lines —
+  // outranks the peek
+  const want = h >= 0 && !boardFor(h) && !lodShown.has(h) ? h : -1;
   if (want === peekId) {
     if (peekHideT) { clearTimeout(peekHideT); peekHideT = 0; }
     if (peekWait >= 0) { clearTimeout(peekDwellT); peekWait = -1; }
@@ -1565,33 +1612,7 @@ function drawBoards(W, H, accent, dimInk) {
       const lo = Math.min(ids[i], ids[j]), hi = Math.max(ids[i], ids[j]);
       if (!manualPairs.has(pairKey(lo, hi)) &&
           !neighborsOf(lo).includes(hi) && !neighborsOf(hi).includes(lo)) continue;
-      ensureEdgeTerms({a: lo, b: hi}); // cached: one fetch per pair, ever
-      const ra = rects.get(ids[i]), rb = rects.get(ids[j]);
-      const [x0, y0] = rectEdgePoint(ra, rb.x + rb.w / 2, rb.y + rb.h / 2);
-      const [x1, y1] = rectEdgePoint(rb, ra.x + ra.w / 2, ra.y + ra.h / 2);
-      const hot = sameEdge(connHover, {a: lo, b: hi});
-      ctx.globalAlpha = hot ? 0.95 : 0.5;
-      ctx.strokeStyle = accent;
-      ctx.lineWidth = hot ? 1.5 : 1;
-      ctx.beginPath();
-      ctx.moveTo(x0, y0);
-      ctx.lineTo(x1, y1);
-      ctx.stroke();
-      ctx.globalAlpha = 1;
-      let lab = edgeTermText({a: lo, b: hi});
-      if (lab.length > 44) lab = lab.slice(0, 43) + "…";
-      const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
-      const tw = ctx.measureText(lab).width;
-      ctx.globalAlpha = 0.92;
-      ctx.fillStyle = panel;
-      ctx.fillRect(mx - tw / 2 - 4, my - 8, tw + 8, 15);
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = accent;
-      ctx.textAlign = "center";
-      ctx.fillText(lab, mx, my + 3);
-      ctx.textAlign = "start";
-      connSegs.push({a: lo, b: hi, x0, y0, x1, y1,
-                     lx0: mx - tw / 2 - 4, ly0: my - 8, lx1: mx + tw / 2 + 4, ly1: my + 7});
+      drawConnSeg(rects.get(ids[i]), rects.get(ids[j]), lo, hi, accent, panel, false);
     }
   }
   // drag-to-connect: dashed provisional line; commit happens on release
@@ -1608,6 +1629,319 @@ function drawBoards(W, H, accent, dimInk) {
     ctx.setLineDash([]);
     ctx.globalAlpha = 1;
   }
+}
+
+// One labeled connector between two card rects — shared by pinned boards
+// and ambient LOD cards. Labels are vocabulary TERMS, never a score
+// (DESIGN.md §1.2). `ambient` draws fainter and shows the label only when
+// the on-screen edge is long enough to carry it; the seg always joins
+// connSegs, so hover and click→compare work identically for both kinds.
+function drawConnSeg(ra, rb, lo, hi, accent, panel, ambient) {
+  ensureEdgeTerms({a: lo, b: hi}); // cached: one fetch per pair, ever
+  const [x0, y0] = rectEdgePoint(ra, rb.x + rb.w / 2, rb.y + rb.h / 2);
+  const [x1, y1] = rectEdgePoint(rb, ra.x + ra.w / 2, ra.y + ra.h / 2);
+  const hot = sameEdge(connHover, {a: lo, b: hi});
+  ctx.globalAlpha = hot ? 0.95 : ambient ? 0.35 : 0.5;
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = hot ? 1.5 : 1;
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x1, y1);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+  const seg = {a: lo, b: hi, x0, y0, x1, y1, lx0: 0, ly0: 0, lx1: -1, ly1: -1};
+  let lab = edgeTermText({a: lo, b: hi});
+  if (lab.length > 44) lab = lab.slice(0, 43) + "…";
+  const tw = ctx.measureText(lab).width;
+  if (!ambient || Math.hypot(x1 - x0, y1 - y0) > tw + 24) {
+    const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+    ctx.globalAlpha = 0.92;
+    ctx.fillStyle = panel;
+    ctx.fillRect(mx - tw / 2 - 4, my - 8, tw + 8, 15);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = accent;
+    ctx.textAlign = "center";
+    ctx.fillText(lab, mx, my + 3);
+    ctx.textAlign = "start";
+    seg.lx0 = mx - tw / 2 - 4;
+    seg.ly0 = my - 8;
+    seg.lx1 = mx + tw / 2 + 4;
+    seg.ly1 = my + 7;
+  }
+  connSegs.push(seg);
+}
+
+/* ── semantic zoom (TKI-69): the elbow-room LOD ladder ──
+   Zoom is disclosure: a dot whose on-screen cell has room sprouts a
+   canvas chip (name, then signature once source is cached); more room
+   still and it blooms an ambient world-scaled card with its first lines,
+   bounded by viewport area — never by node count. Chips and cards are
+   pure functions of (view, plane, caches): deterministic per frame. */
+// Per-symbol elbow room: distance to the nearest visible layout neighbor
+// in normalized plane units, capped so isolation alone can't spawn cards
+// at landing zoom (the k-gates are the hard floor regardless).
+function computeSpacing() {
+  spacing = new Float64Array(S.length).fill(0.08);
+  for (let i = 0; i < S.length; i++) {
+    if (!visible(S[i])) continue;
+    let best = Infinity;
+    for (const j of neighborsOf(i)) {
+      if (!visible(S[j])) continue;
+      const d = Math.hypot(px[i] - px[j], py[i] - py[j]);
+      if (d < best) best = d;
+    }
+    if (isFinite(best)) spacing[i] = Math.min(best, 0.12);
+  }
+}
+function cellOf(i, W) { return spacing[i] * (W - 2 * PAD) * view.k; }
+// Canvas-text truncation that never splits a surrogate pair.
+function fitText(t, maxChars) {
+  if (t.length <= maxChars) return t;
+  let cut = Math.max(1, maxChars - 1);
+  const c = t.charCodeAt(cut - 1);
+  if (c >= 0xD800 && c <= 0xDBFF) cut--;
+  return t.slice(0, cut) + "…";
+}
+// The chip's signature line: the first def/class line from the top —
+// decorators can run long (a parametrize table is one decorator), so the
+// scan is bounded generously, falling back to the first line verbatim.
+function sigLine(src) {
+  const lines = src.text.split("\n", 40);
+  for (const l of lines) {
+    const t = l.trimStart();
+    if (t.startsWith("def ") || t.startsWith("async def ") || t.startsWith("class ")) return t;
+  }
+  return (lines[0] || "").trimStart();
+}
+// Mid-zoom chips: canvas text beside the dot — name immediately (client
+// data, #1), signature once /api/source is cached (#38 reconcile). No DOM,
+// and no fetch here: drainLod fills sources only after the view settles.
+// Density-culled like drawDirLabels: roomiest dots place first, a chip
+// colliding with an already-placed one skips this frame (deterministic).
+function drawChips(W, H, dimInk) {
+  if (mode !== "map" || view.k < LOD.chipK) return;
+  const inkC = cssVar("--ink");
+  ctx.font = "10px ui-monospace, Menlo, monospace";
+  const focus = focusDirs.size > 0;
+  const cands = [];
+  for (let i = 0; i < S.length; i++) {
+    const s = S[i];
+    if (!visible(s) || boardFor(i) || lodShown.has(i)) continue;
+    if (focus && !focusDirs.has(dirOf(s))) continue;
+    const cell = cellOf(i, W);
+    if (cell < LOD.chipCell) continue;
+    const [x, y] = screenXY(i);
+    if (x < -60 || y < -20 || x > W + 20 || y > H + 20) continue;
+    const maxChars = Math.floor(Math.min(cell * 0.9, 280) / 6);
+    if (maxChars < 4) continue;
+    cands.push({i, cell, x, y, maxChars});
+  }
+  cands.sort((a, b) => b.cell - a.cell || a.i - b.i);
+  const placed = [];
+  for (const c of cands) {
+    const s = S[c.i];
+    const tx = c.x + radii[c.i] + 5;
+    const name = fitText(s.qname, c.maxChars);
+    const src = srcCache.get(c.i);
+    const sig = src && src.text ? fitText(sigLine(src), c.maxChars) : null;
+    const w = Math.max(name.length, sig ? sig.length : 0) * 6;
+    const box = {x0: tx - 2, x1: tx + w + 2, y0: c.y - 11, y1: sig ? c.y + 13 : c.y + 2};
+    if (placed.some(o => o.x0 < box.x1 && box.x0 < o.x1 && o.y0 < box.y1 && box.y0 < o.y1)) continue;
+    placed.push(box);
+    ctx.globalAlpha = s.is_test ? 0.6 : 0.9;
+    ctx.fillStyle = inkC;
+    ctx.fillText(name, tx, c.y - 1);
+    if (sig) {
+      ctx.globalAlpha = 0.75;
+      ctx.fillStyle = dimInk;
+      ctx.fillText(sig, tx, c.y + 10);
+    } else if (!srcCache.has(c.i)) {
+      lodWish.push({id: c.i, cell: c.cell});
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+// Ambient LOD cards: world-scaled board cards on the dots with the most
+// room, capped by what the viewport can hold. Display-only (clicks fall
+// through to the dot, which pins/selects as in TKI-68).
+function lodCard(id) {
+  let c = lodPool.get(id);
+  if (!c) {
+    const s = S[id];
+    const el = document.createElement("div");
+    el.className = "board lod";
+    const head = document.createElement("div");
+    head.className = "bhead";
+    const name = document.createElement("span");
+    name.className = "bname";
+    name.textContent = s.qname;
+    const loc = document.createElement("span");
+    loc.className = "bloc";
+    loc.textContent = `${midPath(s.file, 24)}:${s.line}`;
+    head.append(name, loc);
+    el.appendChild(head);
+    const body = document.createElement("div");
+    body.className = "bbody";
+    const wait = document.createElement("div");
+    wait.className = "bwait";
+    wait.textContent = "…";
+    body.appendChild(wait);
+    el.appendChild(body);
+    c = {el, h: 0};
+    lodPool.set(id, c);
+    if (lodPool.size > 96) { // bound the pool; evict detached, oldest first
+      for (const [k, v] of lodPool) {
+        if (lodPool.size <= 64) break;
+        if (!v.el.isConnected) { v.el.remove(); lodPool.delete(k); }
+      }
+    }
+  }
+  return c;
+}
+function fillLodCard(c, id) {
+  if (c.el.dataset.filled) return;
+  const src = srcCache.get(id);
+  if (!src) return;
+  const body = c.el.querySelector(".bbody");
+  body.textContent = "";
+  const cut = peekCut(src, PEEK_LINES);
+  const end = cut > 0 && src.text[cut - 1] === "\n" &&
+    !src.toks.some(t => t[0] <= cut - 1 && t[1] > cut - 1) ? cut - 1 : cut;
+  const pre = document.createElement("pre");
+  pre.className = "code";
+  emitToks(pre, src.text, src.toks, 0, end, false);
+  body.appendChild(pre);
+  const more = document.createElement("div");
+  more.className = "pk-more";
+  if (cut < src.text.length) {
+    let shown = 0;
+    for (let i = 0; i < cut; i++) if (src.text.charCodeAt(i) === 10) shown++;
+    more.textContent = `… ${lineCount(src.text) - shown} more lines · click the dot to pin`;
+  } else {
+    more.textContent = "click the dot to pin";
+  }
+  body.appendChild(more);
+  c.el.dataset.filled = "1";
+  c.h = 0; // remeasure below
+}
+function drawLodCards(W, H) {
+  const shown = new Set();
+  const rects = new Map();
+  const cands = [];
+  if (mode === "map" && view.k >= LOD.cardK && spacing) {
+    const focus = focusDirs.size > 0;
+    for (let i = 0; i < S.length; i++) {
+      if (!visible(S[i]) || boardFor(i)) continue;
+      if (focus && !focusDirs.has(dirOf(S[i]))) continue;
+      const cell = cellOf(i, W);
+      if (cell < LOD.cardCell) continue;
+      const [x, y] = screenXY(i);
+      if (x < -400 || y < -300 || x > W + 60 || y > H + 60) continue;
+      cands.push({i, cell, x, y});
+    }
+    cands.sort((a, b) => b.cell - a.cell || a.i - b.i); // deterministic cap
+  }
+  for (const cd of cands.slice(0, LOD.cardCap)) {
+    const c = lodCard(cd.i);
+    if (!c.el.isConnected) { $("stage").appendChild(c.el); c.h = 0; }
+    fillLodCard(c, cd.i);
+    if (!srcCache.has(cd.i)) lodWish.push({id: cd.i, cell: cd.cell});
+    if (!c.h) c.h = c.el.offsetHeight; // measured once per content change
+    const sc = Math.min(1.25, cd.cell / LOD.cardScale);
+    c.el.style.transform = `scale(${sc})`;
+    c.el.style.left = (cd.x + 10) + "px";
+    c.el.style.top = (cd.y + 10) + "px";
+    shown.add(cd.i);
+    rects.set(cd.i, {x: cd.x + 10, y: cd.y + 10, w: 340 * sc, h: c.h * sc});
+  }
+  for (const [id, c] of lodPool) {
+    if (!shown.has(id) && c.el.isConnected) c.el.remove();
+  }
+  lodShown = shown;
+  return rects;
+}
+// Ambient lines between visible LOD cards that are layout neighbors — the
+// visible set IS the graph, no pinning required. Same hit band, hover tip
+// and click→compare as pinned-board connectors (segs share connSegs).
+// Spaghetti cap: each card connects to at most its top-2 visible
+// neighbors, in the layout's own nnp/nn ranking order (deterministic);
+// pairs dedupe. Pinned-board and manual-pair connectors are unaffected.
+function drawLodConnectors(rects, accent) {
+  const panel = cssVar("--panel");
+  ctx.font = "10px ui-monospace, Menlo, monospace";
+  const pairs = new Set();
+  for (const id of rects.keys()) {
+    let n = 0;
+    for (const j of neighborsOf(id)) {
+      if (!rects.has(j)) continue;
+      pairs.add(pairKey(id, j));
+      if (++n >= 2) break;
+    }
+  }
+  for (const key of pairs) {
+    const [lo, hi] = key.split(":").map(Number);
+    drawConnSeg(rects.get(lo), rects.get(hi), lo, hi, accent, panel, true);
+  }
+}
+// The settle drain: the view has been still for LOD.settle ms — fetch the
+// missing sources for what the ladder wants to show, biggest cells first,
+// a bounded batch per settle. Everything lands in srcCache (shared with
+// the peek and boards), so nothing is ever fetched twice.
+function drainLod() {
+  lodTimer = 0;
+  const batch = lodWish.sort((a, b) => b.cell - a.cell || a.id - b.id).slice(0, 32);
+  for (const w of batch) ensureSource(w.id);
+  lodWish = [];
+}
+
+/* ── auto-drill (TKI-69, flag-gated): zoom as the drill gesture ──
+   Committed crossings only: crossing the in/out threshold arms a settle
+   timer, and the drill fires only if the zoom still sits past the
+   threshold when it lands — an overshoot that snaps back inside the band
+   commits nothing. Every drill refits the view to k=1, deep inside the
+   dead band (in=8, out=0.4), so one gesture can never double-fire:
+   hysteresis by construction. Manual drilling stays the always-on path. */
+function armAd(fn) {
+  clearTimeout(adTimer);
+  adTimer = setTimeout(() => { adTimer = 0; fn(); }, LOD.settle);
+}
+// Every zoom-IN wheel step above the threshold re-arms the settle check,
+// so a determined continuous zoom commits once, ~settle ms after the
+// gesture pauses. Oscillation stays committed-crossing-gated: dropping
+// back inside the dead band cancels the pending timer.
+function autoDrill(k0, k1, ax, ay) {
+  if (k1 > LOD.inK && k1 > k0) {
+    armAd(() => {
+      if (!zoomDrill || view.k <= LOD.inK) return;
+      const p = clusterAtPoint(ax, ay);
+      if (p) drillTo(p);
+    });
+  } else if (drill && k0 >= LOD.outK && k1 < LOD.outK) {
+    armAd(() => {
+      if (zoomDrill && view.k < LOD.outK) drillUp();
+    });
+  } else if (adTimer && k1 <= LOD.inK && k1 >= LOD.outK) {
+    clearTimeout(adTimer); // re-entered the dead band before commitment
+    adTimer = 0;
+  }
+}
+// The island whose gated core contains the ZOOM-GESTURE ANCHOR — the
+// wheel cursor, which cursor-anchored zoom keeps fixed while the viewport
+// center is still converging toward it. Converted with the view transform
+// at fire time; nearest centroid wins when cores overlap; null over open
+// water or a non-path key.
+function clusterAtPoint(sx, sy) {
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  const bx = (sx - view.tx) / view.k, by = (sy - view.ty) / view.k;
+  const nx = (bx - PAD) / (W - 2 * PAD), ny = (H - PAD - by) / (H - 2 * PAD);
+  const src = drill ? drill.labels : META.labels;
+  const labs = showTests ? src.full : src.prod;
+  let best = null, bestD = Infinity;
+  for (const L of labs) {
+    const d = Math.hypot(nx - L.x, ny - L.y);
+    if (d <= Math.max(L.r, 0.02) && d < bestD) { bestD = d; best = L; }
+  }
+  return best ? drillTarget(best.dir) : null;
 }
 
 /* ── selection: the anchor ── */
@@ -2391,6 +2725,12 @@ function initControls() {
   $("ax").addEventListener("change", onAxis);
   $("ay").addEventListener("change", onAxis);
 
+  $("zoomdrill").addEventListener("change", () => {
+    zoomDrill = $("zoomdrill").checked;
+    clearTimeout(adTimer);
+    adTimer = 0; // toggling off abandons any pending crossing
+  });
+
   $("tests").addEventListener("change", () => {
     showTests = $("tests").checked;
     layout(); // extents are over visible symbols
@@ -2498,11 +2838,13 @@ function initControls() {
   canvas.addEventListener("wheel", e => {
     e.preventDefault();
     const f = Math.exp(-e.deltaY * 0.0015);
-    const k2 = Math.min(80, Math.max(0.25, view.k * f));
+    const k0 = view.k;
+    const k2 = Math.min(80, Math.max(0.25, k0 * f));
     const mx = e.offsetX, my = e.offsetY;
     view.tx = mx - (mx - view.tx) * (k2 / view.k);
     view.ty = my - (my - view.ty) * (k2 / view.k);
     view.k = k2;
+    if (zoomDrill && mode === "map") autoDrill(k0, k2, mx, my);
     // the map moved under a resting cursor: re-run the hover pass so the
     // tip/peek can't orphan on a dot that zoomed away (#39)
     mouse = {x: mx, y: my};
