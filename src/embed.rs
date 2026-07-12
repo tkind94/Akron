@@ -8,7 +8,10 @@
 //! — the strongest model of both bake-off rounds
 //! (R&D archive spike/embed2/RESULTS.md "Round 2"): best graded find P@5 (pooled 0.59;
 //! 0.68 on the private domain corpus, 0.50 on httpx — beats a best-faith
-//! grep on both repo shapes) and best-or-tied map quality, at 331 MB
+//! grep on both repo shapes). NB: that 0.59 pools a private corpus absent
+//! from `scripts/eval-find`; the public httpx+scrapy questions score 0.514
+//! (reproduced 2026-07-12, TKI-75) — compare candidates against 0.514, not
+//! 0.59. Best-or-tied map quality, at 331 MB
 //! download / ~2.2 GB peak RSS. Pulled from Hugging Face on first use
 //! under the model's own terms (Gemma Terms of Use) — Akron redistributes
 //! nothing.
