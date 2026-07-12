@@ -476,8 +476,8 @@ footer {
   </span>
   <label><input type="checkbox" id="tests"> tests</label>
   <label id="callsLbl" title="follow the chain of calls around the selection — callers and callees, this many hops out; static name-resolved calls, no dynamic dispatch">calls <select id="calls">
-    <option value="0" selected>off</option>
-    <option value="1">1 hop</option>
+    <option value="0">off</option>
+    <option value="1" selected>1 hop</option>
     <option value="2">2 hops</option>
     <option value="3">3 hops</option>
   </select></label>
@@ -527,7 +527,11 @@ let META = {pca_var: [], labels: {prod: [], full: []}}; // /api/meta
 let radii = [];             // px per symbol
 let dirColor = {};          // top-level dir -> color
 let showTests = BOOT.tests;
-let callDepth = 0;          // calls channel (TKI-72/79): BFS hops from the selection, 0 = off
+// calls channel (TKI-72/79): BFS hops from the selection. Default 1 — the
+// chain is part of what selecting means (CEO: "the chain of calls really
+// tells you what matters"); 0 = off stays a choice for a quieter map.
+let callDepth = 1;
+let callsTouched = false;   // the user has changed the dropdown this session
 let callersOf = [];         // per-symbol incoming call ids — S[].calls inverted once at boot
 let focusDirs = new Set();  // legend chips; empty = all
 let branchFocus = false;    // branch chip: ring branch-new, fade the rest
@@ -758,7 +762,11 @@ function draw() {
     // accent similarity edges above; selection-scoped, never all-pairs
     // at repo zoom
     if (callsOn) drawCallEdges(cssVar("--call"), cssVar("--call-in"));
-    if (edgeHover && visible(S[edgeHover.a]) && visible(S[edgeHover.b])) {
+    // a call-flavored hover is drawn hot by drawCallEdges in its own ink —
+    // the accent repaint below is for layout edges only, so a call edge
+    // can never flash accent (and a stale call hover with the selection
+    // gone draws nothing at all)
+    if (edgeHover && !edgeHover.call && visible(S[edgeHover.a]) && visible(S[edgeHover.b])) {
       const [x0, y0] = screenXY(edgeHover.a);
       const [x1, y1] = screenXY(edgeHover.b);
       ctx.globalAlpha = 0.9;
@@ -1368,8 +1376,11 @@ function footer() {
   };
   dateNote(axisX, "x", parked.x);
   dateNote(axisY, "y", parked.y);
-  // calls on, nothing to draw yet: say what would make edges appear (#14)
-  if (callDepth > 0 && mode === "map" && selected < 0 && !boards.some(b => !b.min)) {
+  // calls set by hand, nothing to draw yet: say what would make edges
+  // appear (#14, #22 — the act deserves a response). The untouched default
+  // stays silent: at boot the standing hint teaches select-first anyway,
+  // and this note would displace it.
+  if (callsTouched && callDepth > 0 && mode === "map" && selected < 0 && !boards.some(b => !b.min)) {
     notes.push("calls: select or pin a symbol to see its call edges");
   }
   if (mode === "axes") {
@@ -3243,6 +3254,7 @@ function initControls() {
   // switching depth just redraws (the BFS cache keys on depth).
   $("calls").addEventListener("change", () => {
     callDepth = +$("calls").value;
+    callsTouched = true;
     if (!callDepth) {
       if (edgeHover && edgeHover.call) edgeHover = null;
       if (connHover && connHover.call) connHover = null;

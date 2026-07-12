@@ -233,8 +233,8 @@ anything; it never auto-pans or auto-drills.
 topbar overlays directed call arrows — name-resolved static calls, direct
 only, the same import-aware edge set the card's callers/callees lists
 show — walked 1, 2, or 3 hops out from the selected symbol in both
-directions (turning it on starts at 1 hop), and between pinned board
-cards. Callee-direction arrows are amber, caller-direction violet, and
+directions (on at one hop by default; `off` stays a choice for a quieter
+map), and between pinned board cards. Callee-direction arrows are amber, caller-direction violet, and
 each hop past the first draws fainter, so a chain reads as a gradient
 away from the selection; hop-2+ endpoints wear a thin ring in their
 direction's hue. Arrows are structure, not similarity: arrowheads and
