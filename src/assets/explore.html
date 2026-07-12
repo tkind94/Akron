@@ -156,7 +156,11 @@ main { display: grid; grid-template-columns: 1fr 340px; min-height: 0; position:
 /* the viewer needs room for code; the landing (guide) state keeps the
    original 340px so the map's first impression is untouched */
 main.hasSel { grid-template-columns: 1fr minmax(420px, 46%); }
-#stage { position: relative; min-width: 0; }
+/* overflow hidden (TKI-69): ambient LOD cards are world-anchored DOM and
+   can straddle the stage edge — clip them at the map boundary so they can
+   never paint over the panel, header, or legend. Pinned boards/peek/tip
+   are viewport-clamped already, so this changes nothing for them. */
+#stage { position: relative; min-width: 0; overflow: hidden; }
 #map { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 
 /* ── hover tooltip (TKI-66): identity at the cursor; never a hit target ── */
@@ -1859,16 +1863,24 @@ function drawLodCards(W, H) {
 // Ambient lines between visible LOD cards that are layout neighbors — the
 // visible set IS the graph, no pinning required. Same hit band, hover tip
 // and click→compare as pinned-board connectors (segs share connSegs).
+// Spaghetti cap: each card connects to at most its top-2 visible
+// neighbors, in the layout's own nnp/nn ranking order (deterministic);
+// pairs dedupe. Pinned-board and manual-pair connectors are unaffected.
 function drawLodConnectors(rects, accent) {
   const panel = cssVar("--panel");
-  const ids = [...rects.keys()];
   ctx.font = "10px ui-monospace, Menlo, monospace";
-  for (let i = 0; i < ids.length; i++) {
-    for (let j = i + 1; j < ids.length; j++) {
-      const lo = Math.min(ids[i], ids[j]), hi = Math.max(ids[i], ids[j]);
-      if (!neighborsOf(lo).includes(hi) && !neighborsOf(hi).includes(lo)) continue;
-      drawConnSeg(rects.get(ids[i]), rects.get(ids[j]), lo, hi, accent, panel, true);
+  const pairs = new Set();
+  for (const id of rects.keys()) {
+    let n = 0;
+    for (const j of neighborsOf(id)) {
+      if (!rects.has(j)) continue;
+      pairs.add(pairKey(id, j));
+      if (++n >= 2) break;
     }
+  }
+  for (const key of pairs) {
+    const [lo, hi] = key.split(":").map(Number);
+    drawConnSeg(rects.get(lo), rects.get(hi), lo, hi, accent, panel, true);
   }
 }
 // The settle drain: the view has been still for LOD.settle ms — fetch the
@@ -1893,11 +1905,15 @@ function armAd(fn) {
   clearTimeout(adTimer);
   adTimer = setTimeout(() => { adTimer = 0; fn(); }, LOD.settle);
 }
-function autoDrill(k0, k1) {
-  if (k0 <= LOD.inK && k1 > LOD.inK) {
+// Every zoom-IN wheel step above the threshold re-arms the settle check,
+// so a determined continuous zoom commits once, ~settle ms after the
+// gesture pauses. Oscillation stays committed-crossing-gated: dropping
+// back inside the dead band cancels the pending timer.
+function autoDrill(k0, k1, ax, ay) {
+  if (k1 > LOD.inK && k1 > k0) {
     armAd(() => {
       if (!zoomDrill || view.k <= LOD.inK) return;
-      const p = clusterAtCenter();
+      const p = clusterAtPoint(ax, ay);
       if (p) drillTo(p);
     });
   } else if (drill && k0 >= LOD.outK && k1 < LOD.outK) {
@@ -1909,12 +1925,14 @@ function autoDrill(k0, k1) {
     adTimer = 0;
   }
 }
-// The island whose gated core contains the viewport center, in the current
-// scope's geometry — nearest centroid wins when cores overlap; null when
-// the center sits over open water or a non-path key.
-function clusterAtCenter() {
+// The island whose gated core contains the ZOOM-GESTURE ANCHOR — the
+// wheel cursor, which cursor-anchored zoom keeps fixed while the viewport
+// center is still converging toward it. Converted with the view transform
+// at fire time; nearest centroid wins when cores overlap; null over open
+// water or a non-path key.
+function clusterAtPoint(sx, sy) {
   const W = canvas.clientWidth, H = canvas.clientHeight;
-  const bx = (W / 2 - view.tx) / view.k, by = (H / 2 - view.ty) / view.k;
+  const bx = (sx - view.tx) / view.k, by = (sy - view.ty) / view.k;
   const nx = (bx - PAD) / (W - 2 * PAD), ny = (H - PAD - by) / (H - 2 * PAD);
   const src = drill ? drill.labels : META.labels;
   const labs = showTests ? src.full : src.prod;
@@ -2826,7 +2844,7 @@ function initControls() {
     view.tx = mx - (mx - view.tx) * (k2 / view.k);
     view.ty = my - (my - view.ty) * (k2 / view.k);
     view.k = k2;
-    if (zoomDrill && mode === "map") autoDrill(k0, k2);
+    if (zoomDrill && mode === "map") autoDrill(k0, k2, mx, my);
     // the map moved under a resting cursor: re-run the hover pass so the
     // tip/peek can't orphan on a dot that zoomed away (#39)
     mouse = {x: mx, y: my};
