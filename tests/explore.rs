@@ -194,6 +194,89 @@ fn symbols_rows_carry_the_import_aware_indegree() {
     }
 }
 
+// ── the calls channel (TKI-72) ──
+
+#[test]
+fn symbols_rows_carry_directed_call_edge_ids() {
+    // The planted wrapper pair: fetch_atlas_tile (wrapper_caller.py) calls
+    // fetch_tile (wrapper_callee.py) via `from wrapper_callee import
+    // fetch_tile` — an import-resolved direct edge, in one direction only.
+    let state = fixture_state();
+    let n = state.analysis.scanned.symbols.len();
+    let v = json(&explore::respond(&state, "/api/symbols"));
+    let rows = v.as_array().unwrap();
+    let id_of = |q: &str| {
+        rows.iter()
+            .find(|r| r["qname"] == q)
+            .unwrap_or_else(|| panic!("fixture symbol {q}"))["id"]
+            .as_u64()
+            .unwrap()
+    };
+    let (caller, callee) = (id_of("fetch_atlas_tile"), id_of("fetch_tile"));
+    let calls_of = |id: u64| {
+        rows[id as usize]["calls"]
+            .as_array()
+            .expect("every row ships a calls array")
+            .iter()
+            .map(|e| e.as_u64().unwrap())
+            .collect::<Vec<u64>>()
+    };
+    assert!(
+        calls_of(caller).contains(&callee),
+        "wrapper caller must carry its out-edge to the callee"
+    );
+    assert!(
+        !calls_of(callee).contains(&caller),
+        "the channel is directed: the callee carries no reverse edge"
+    );
+    for r in rows {
+        let id = r["id"].as_u64().unwrap();
+        let calls = calls_of(id);
+        let mut sorted = calls.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(calls, sorted, "calls ids sorted ascending, deduped");
+        assert!(calls.iter().all(|&e| e < n as u64 && e != id), "in range, no self");
+        // fixtures sit far under the cap: the honest-overflow field only
+        // exists when ids were actually dropped
+        assert!(r.as_object().unwrap().get("calls_over").is_none());
+    }
+}
+
+#[test]
+fn calls_channel_agrees_with_the_explain_card_on_every_symbol() {
+    // One edge set on one screen: row `calls` must equal the card's callees,
+    // and the boot-time inversion the page performs must equal the card's
+    // callers — for every symbol in the corpus.
+    let state = fixture_state();
+    let v = json(&explore::respond(&state, "/api/symbols"));
+    let rows = v.as_array().unwrap();
+    let n = rows.len();
+    let mut inverted: Vec<Vec<u64>> = vec![Vec::new(); n];
+    for r in rows {
+        let id = r["id"].as_u64().unwrap();
+        for e in r["calls"].as_array().unwrap() {
+            inverted[e.as_u64().unwrap() as usize].push(id);
+        }
+    }
+    for id in 0..n {
+        let card = akron::explain::card(&state.analysis, &state.indeg, id);
+        let mut card_callees: Vec<u64> = card.callees.iter().map(|&i| i as u64).collect();
+        card_callees.sort_unstable();
+        let row_calls: Vec<u64> = rows[id]["calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e.as_u64().unwrap())
+            .collect();
+        assert_eq!(row_calls, card_callees, "callees diverge at symbol {id}");
+        let mut card_callers: Vec<u64> = card.callers.iter().map(|&i| i as u64).collect();
+        card_callers.sort_unstable();
+        inverted[id].sort_unstable();
+        assert_eq!(inverted[id], card_callers, "callers diverge at symbol {id}");
+    }
+}
+
 // ── /api/sublayout (TKI-54 drill-down) ──
 
 #[test]

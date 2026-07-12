@@ -60,6 +60,14 @@
 //! deterministic), so hovering an edge answers "what code am I exploring
 //! along". Pure read over the boot-time vocab index; no model number ships.
 //!
+//! Call channel (TKI-72): every `/api/symbols` row carries `calls` — the
+//! symbol's outgoing direct-call edge ids (`explain::call_edges`, the same
+//! `is_real_edge`-gated set the card's callers/callees list shows, so the
+//! map channel and the panel can never disagree on the same screen). Ids
+//! are sorted, capped at `CALL_CAP` with an honest `calls_over` count when
+//! capped; the page inverts the arrays once at boot for incoming edges, so
+//! toggling/hovering the channel never fetches.
+//!
 //! Convention prevalence (TKI-56): the start card's one factual line —
 //! `module docstring: 14 of 19 files`. `file_docs` classifies every scanned
 //! `.py` file once at boot (`has_module_docstring`, model-free, feature-free)
@@ -191,6 +199,12 @@ fn color_depth(files: &[&str]) -> usize {
 /// other window sizes the guarantee scales with the zoom factor — the
 /// relaxation is exact at reference scale, proportional elsewhere.
 const REF_EXTENT_PX: f64 = 832.0;
+
+/// Per-symbol cap on the `calls` id array shipped in `/api/symbols`
+/// (TKI-72). Out-degree is the count of *distinct resolved callees* — small
+/// in practice — so the cap is a payload valve for pathological corpora,
+/// not an expected path; a capped row says so via `calls_over`.
+const CALL_CAP: usize = 32;
 
 fn world_radii(symbols: &[crate::types::SymbolPrint]) -> Vec<f32> {
     let mut lo = f64::INFINITY;
@@ -744,6 +758,8 @@ pub fn state_from(
     );
     let sources = resolve_sources(raw_sources, symbols);
     let indeg = explain::indegree(symbols);
+    // TKI-72: the calls channel's adjacency — the card's own edge set.
+    let call_out = explain::call_edges(symbols);
     let p = pca::pca(&embeddings, 8);
     let pca_scores: Vec<Vec<f32>> = if p.scores.is_empty() {
         vec![vec![0.0; 8]; symbols.len()]
@@ -808,7 +824,7 @@ pub fn state_from(
         .iter()
         .enumerate()
         .map(|(i, s)| {
-            json!({
+            let mut row = json!({
                 "id": i,
                 "qname": s.sym.qname,
                 "file": s.sym.file,
@@ -831,7 +847,17 @@ pub fn state_from(
                 // full-geometry ids — the page picks by the tests toggle
                 "nnp": prod_nn_ids[i],
                 "nn": full_nn_ids[i],
-            })
+            });
+            // calls channel (TKI-72): outgoing direct-call ids, sorted;
+            // `calls_over` appears only when the cap actually dropped ids
+            let calls = &call_out[i];
+            if calls.len() > CALL_CAP {
+                row["calls"] = json!(calls[..CALL_CAP]);
+                row["calls_over"] = json!(calls.len() - CALL_CAP);
+            } else {
+                row["calls"] = json!(calls);
+            }
+            row
         })
         .collect();
     let symbols_json = serde_json::to_vec(&Value::Array(rows)).expect("symbols json");
