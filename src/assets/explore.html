@@ -291,8 +291,11 @@ main.hasSel { grid-template-columns: 1fr minmax(420px, 46%); }
   padding: 10px 12px;
 }
 #panel .empty { color: var(--dim); }
-#panel h2 { font-size: 13px; word-break: break-all; line-height: 1.3; }
+#panel h2 { font-size: 13px; line-height: 1.3; display: flex; align-items: baseline; gap: 8px; }
+#panel h2 .name { min-width: 0; word-break: break-all; flex: 1; }
 #panel h2 .ctx { color: var(--dim); font-weight: 400; }
+#panel h2 .close { flex: none; color: var(--dim); cursor: pointer; }
+#panel h2 .close:hover { color: var(--accent); }
 #panel .loc { color: var(--dim); }
 #panel .loc .pathseg { cursor: pointer; }
 /* drill affordance (TKI-66): path segments visibly act on hover */
@@ -473,7 +476,6 @@ footer {
   </span>
   <label><input type="checkbox" id="tests"> tests</label>
   <label id="callsLbl" title="show static call edges for the selection and pinned cards — name-resolved direct calls, no dynamic dispatch"><input type="checkbox" id="calls"> calls</label>
-  <label title="zooming deep over a cluster opens it; zooming far out climbs back — off: labels and path segments drill as always"><input type="checkbox" id="zoomdrill"> zoom drills</label>
 </header>
 <div id="chips"></div>
 <main>
@@ -512,7 +514,7 @@ const AXES = [
   {id:"pca4", label:"PCA-5"}, {id:"pca5", label:"PCA-6"},
   {id:"pca6", label:"PCA-7"}, {id:"pca7", label:"PCA-8"},
 ];
-const DEFAULT_HINT = "drag pan · wheel zoom · click select + pin its card · click a dir label/▸ to open it · esc back / drill up";
+const DEFAULT_HINT = "drag pan · wheel zoom · click select + pin its card, click again or empty canvas to unselect · click a dir label/▸ to open it · esc clears selection";
 
 let S = [];                 // /api/symbols
 let META = {pca_var: [], labels: {prod: [], full: []}}; // /api/meta
@@ -557,8 +559,6 @@ let lodShown = new Set();    // ids carrying a live LOD card this frame
 let lodWish = [];            // chip/card ids missing source, gathered per draw
 let lodTimer = 0;            // zoom-settle debounce before source fetches
 let lastView = {k: 0, tx: 0, ty: 0};
-let zoomDrill = false;       // auto-drill flag; manual drill is always on
-let adTimer = 0;             // committed-crossing settle timer
 const subCache = new Map();  // path -> /api/sublayout payload (deterministic)
 const LOD = {chipK: 2, chipCell: 60, cardK: 5, cardCell: 180, cardScale: 360,
              cardCap: 16, inK: 8, outK: 0.4, settle: 250};
@@ -1190,12 +1190,6 @@ async function drillTo(path) {
   fitView();
   footer();
   scheduleDraw();
-}
-function drillUp() {
-  if (!drill) return;
-  const segs = drill.path.split("/");
-  segs.pop();
-  drillTo(segs.join("/"));
 }
 // where am I / how do I get back: repo › dir › … › file, every ancestor
 // clickable, the current scope bold
@@ -2201,54 +2195,18 @@ function drainLod() {
   lodWish = [];
 }
 
-/* ── auto-drill (TKI-69, flag-gated): zoom as the drill gesture ──
-   Committed crossings only: crossing the in/out threshold arms a settle
-   timer, and the drill fires only if the zoom still sits past the
-   threshold when it lands — an overshoot that snaps back inside the band
-   commits nothing. Every drill refits the view to k=1, deep inside the
-   dead band (in=8, out=0.4), so one gesture can never double-fire:
-   hysteresis by construction. Manual drilling stays the always-on path. */
-function armAd(fn) {
-  clearTimeout(adTimer);
-  adTimer = setTimeout(() => { adTimer = 0; fn(); }, LOD.settle);
-}
-// Every zoom-IN wheel step above the threshold re-arms the settle check,
-// so a determined continuous zoom commits once, ~settle ms after the
-// gesture pauses. Oscillation stays committed-crossing-gated: dropping
-// back inside the dead band cancels the pending timer.
-function autoDrill(k0, k1, ax, ay) {
-  if (k1 > LOD.inK && k1 > k0) {
-    armAd(() => {
-      if (!zoomDrill || view.k <= LOD.inK) return;
-      const p = clusterAtPoint(ax, ay);
-      if (p) drillTo(p);
-    });
-  } else if (drill && k0 >= LOD.outK && k1 < LOD.outK) {
-    armAd(() => {
-      if (zoomDrill && view.k < LOD.outK) drillUp();
-    });
-  } else if (adTimer && k1 <= LOD.inK && k1 >= LOD.outK) {
-    clearTimeout(adTimer); // re-entered the dead band before commitment
-    adTimer = 0;
-  }
-}
-// The island whose gated core contains the ZOOM-GESTURE ANCHOR — the
-// wheel cursor, which cursor-anchored zoom keeps fixed while the viewport
-// center is still converging toward it. Converted with the view transform
-// at fire time; nearest centroid wins when cores overlap; null over open
-// water or a non-path key.
-function clusterAtPoint(sx, sy) {
-  const W = canvas.clientWidth, H = canvas.clientHeight;
-  const bx = (sx - view.tx) / view.k, by = (sy - view.ty) / view.k;
-  const nx = (bx - PAD) / (W - 2 * PAD), ny = (H - PAD - by) / (H - 2 * PAD);
-  const src = drill ? drill.labels : META.labels;
-  const labs = showTests ? src.full : src.prod;
-  let best = null, bestD = Infinity;
-  for (const L of labs) {
-    const d = Math.hypot(nx - L.x, ny - L.y);
-    if (d <= Math.max(L.r, 0.02) && d < bestD) { bestD = d; best = L; }
-  }
-  return best ? drillTarget(best.dir) : null;
+// Unselect (TKI-80): the reverse of select() — an empty-canvas click,
+// re-clicking the already-selected dot, the panel's ✕, and Esc (once no
+// transient state remains) all land here. One action, one name (#41).
+async function deselect() {
+  if (selected < 0) return;
+  selected = -1;
+  anchor = {id: -1, a: null, b: null};
+  syncViews();
+  renderGuide();
+  if (mode === "anchor") { await applyMode("map"); return; } // already painted
+  footer();
+  scheduleDraw();
 }
 
 /* ── selection: the anchor ── */
@@ -2265,7 +2223,8 @@ async function select(id, center, fromBack) {
   // whole-repo map — the breadcrumb resets, so "where am I" stays obvious
   if (drill && !drill.set.has(id)) await drillTo("");
   // back-history (TKI-61): every selection is retraceable; a pop itself
-  // never re-pushes, so esc/← walks straight back
+  // never re-pushes, so the ← chip walks straight back (TKI-80: esc no
+  // longer drives this — it clears the selection instead)
   if (!fromBack && selected >= 0 && selected !== id) {
     navStack.push(selected);
     if (navStack.length > 64) navStack.shift();
@@ -2445,6 +2404,13 @@ async function loadCard(id) {
 
   const h2 = document.createElement("h2");
   h2.appendChild(qnameSpan(c.qname));
+  // explicit close (TKI-80), consistent with a board card's own ✕
+  const close = document.createElement("span");
+  close.className = "close";
+  close.textContent = "✕";
+  close.title = "close";
+  close.addEventListener("click", e => { e.stopPropagation(); deselect(); });
+  h2.appendChild(close);
   card.appendChild(h2);
   // the path doubles as the drill ladder: every segment descends to it
   const loc = document.createElement("div");
@@ -2641,7 +2607,8 @@ async function loadCard(id) {
   }
 }
 
-/* ── back-history (TKI-61): esc or the ← chip retraces jumps ── */
+/* ── back-history (TKI-61): the ← chip retraces jumps (TKI-80: esc no
+   longer does — see the Escape ladder comment) ── */
 function popBack() {
   if (!navStack.length) return;
   select(navStack.pop(), true, true);
@@ -3142,12 +3109,6 @@ function initControls() {
   $("ax").addEventListener("change", onAxis);
   $("ay").addEventListener("change", onAxis);
 
-  $("zoomdrill").addEventListener("change", () => {
-    zoomDrill = $("zoomdrill").checked;
-    clearTimeout(adTimer);
-    adTimer = 0; // toggling off abandons any pending crossing
-  });
-
   // calls channel (TKI-72): persistent channel state like the tests
   // toggle — never an Esc rung. Toggling off clears any call-flavored
   // hover at once, even under a resting cursor (#39).
@@ -3201,8 +3162,9 @@ function initControls() {
     dragging = true; moved = 0; lastX = e.offsetX; lastY = e.offsetY;
   });
   // single click does it all (TKI-68, double-click is dead): a dot pins
-  // its board card AND selects; a board connector opens the compare; a
-  // dir label drills. Pick mode narrows a click to choosing the B side.
+  // its board card AND selects, or unselects on a second click (TKI-80); a
+  // board connector opens the compare; a dir label drills; empty canvas
+  // unselects (TKI-80). Pick mode narrows a click to choosing the B side.
   window.addEventListener("mouseup", e => {
     if (!dragging) return;
     dragging = false;
@@ -3212,6 +3174,9 @@ function initControls() {
     const id = nearest(mx, my);
     if (id >= 0) {
       if (picking < 0) toggleBoard(id);
+      // clicking the already-selected dot again unselects it (TKI-80) —
+      // exploration needs a way back to nothing selected as much as a way in
+      if (picking < 0 && id === selected) { deselect(); return; }
       select(id, false);
       return;
     }
@@ -3221,8 +3186,11 @@ function initControls() {
     if (mode === "map") {
       const b = labelBoxes.find(b =>
         b.path && mx >= b.x0 && mx <= b.x1 && my >= b.y0 && my <= b.y1);
-      if (b) drillTo(b.path);
+      if (b) { drillTo(b.path); return; }
     }
+    // a true click that hit no dot/label/connector: empty canvas clears
+    // the selection (TKI-80) — drag-pan never reaches here (moved >= 4 above)
+    deselect();
   });
   // hover hit-tests (point, edge, island label) run at most once per
   // animation frame — mousemove only records the cursor (TKI-66)
@@ -3254,17 +3222,21 @@ function initControls() {
       scheduleDraw();
     }
   });
-  // Escape ladder: transient state unwinds innermost-first — hitlist,
-  // pick mode, compare, the newest board card (TKI-68), back-history,
-  // then the drill climbs one level
+  // Escape ladder (TKI-80): transient state unwinds innermost-first —
+  // hitlist, pick mode, compare, the newest board card (TKI-68) — then,
+  // with nothing transient left, Esc clears the selection and closes the
+  // panel. It no longer walks back-history or climbs the drill (#13, #15):
+  // those already have dedicated, visible affordances — the "← back" chip
+  // (popBack) and every breadcrumb ancestor segment, which drills up one
+  // level exactly as the old fallback did — so Esc's one job stays legible
+  // instead of doubling as a silent back button.
   document.addEventListener("keydown", e => {
     if (e.key !== "Escape" || e.target === $("search")) return;
     if (!$("hitlist").hidden) { $("hitlist").hidden = true; return; }
     if (picking >= 0) { cancelPick(); return; }
     if (cmp) { closeCompare(); return; }
     if (boards.length) { removeBoard(boards[boards.length - 1]); return; }
-    if (navStack.length) { popBack(); return; }
-    drillUp();
+    deselect();
   });
   $("cmpclose").addEventListener("click", closeCompare);
   $("cmpbsel").addEventListener("change", () => {
@@ -3281,7 +3253,6 @@ function initControls() {
     view.tx = mx - (mx - view.tx) * (k2 / view.k);
     view.ty = my - (my - view.ty) * (k2 / view.k);
     view.k = k2;
-    if (zoomDrill && mode === "map") autoDrill(k0, k2, mx, my);
     // the map moved under a resting cursor: re-run the hover pass so the
     // tip/peek can't orphan on a dot that zoomed away (#39)
     mouse = {x: mx, y: my};
