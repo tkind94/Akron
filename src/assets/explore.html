@@ -713,6 +713,7 @@ function draw() {
   const dimInk = cssVar("--dim"), selInk = cssVar("--sel"), accent = cssVar("--accent");
   const linkInk = cssVar("--link");
   const focus = focusDirs.size > 0;
+  callAmbigDrawn = false; // recomputed by this frame's call-edge passes
 
   // time view: date gridlines under the points
   if (mode === "time" && isFinite(ext.x[0]) && ext.x[1] > ext.x[0]) {
@@ -883,6 +884,7 @@ function draw() {
     // not — including the honest cap when the server dropped ids (#24)
     if (showCalls) {
       cap += " · → calls: name-resolved static calls, direct only";
+      if (callAmbigDrawn) cap += " · dashed = one of N same-name candidates";
       if (selected >= 0 && visible(S[selected]) && S[selected].calls_over) {
         cap += ` · ${S[selected].calls_over} more callees not drawn`;
       }
@@ -929,18 +931,44 @@ function drawEdges(i, alpha, ink) {
    between pinned boards (drawBoards); the encoding is stated in the map
    caption and the toggle's title, and hover names each edge without a
    fetch (#1, #17, #28). */
+// The join key a callee is reached BY — the class segment for a
+// constructor edge (`Widget.__init__` is reached by a call to `Widget`),
+// the base name otherwise. Mirrors call_edges' by_name/class_init keying,
+// so same-key siblings are exactly the candidates one call site fans out
+// to when the resolver can't pick.
+function callKey(qname) {
+  const parts = qname.split(".");
+  const last = parts[parts.length - 1];
+  return last === "__init__" && parts.length >= 2 ? parts[parts.length - 2] : last;
+}
+// How many of `caller`'s callees share callee `j`'s join key. ≥2 means
+// this edge is one of N same-name candidates, not a resolved single call
+// — drawn dashed and said out loud (#28, #24), never as confident
+// structure. Pure client state over S[].calls; no fetch.
+function callFanout(caller, j) {
+  const key = callKey(S[j].qname);
+  let n = 0;
+  for (const t of S[caller].calls) if (callKey(S[t].qname) === key) n++;
+  return n;
+}
+let callAmbigDrawn = false; // any dashed call edge this frame → caption clause
+
 // One arrow from (x0,y0) toward dot b: shortened to b's rim, head at the
-// callee end — direction IS the encoding (caller → callee).
-function callArrow(x0, y0, x1, y1, rb) {
+// callee end — direction IS the encoding (caller → callee). A dashed
+// shaft marks an ambiguous same-name candidate (head stays solid: the
+// direction is certain, the binding is not).
+function callArrow(x0, y0, x1, y1, rb, dashed) {
   const dx = x1 - x0, dy = y1 - y0;
   const len = Math.hypot(dx, dy);
   if (len < rb + 10) return; // too short for a readable head
   const ux = dx / len, uy = dy / len;
   const ex = x1 - ux * (rb + 2), ey = y1 - uy * (rb + 2);
+  if (dashed) ctx.setLineDash([4, 3]);
   ctx.beginPath();
   ctx.moveTo(x0, y0);
   ctx.lineTo(ex, ey);
   ctx.stroke();
+  if (dashed) ctx.setLineDash([]);
   ctx.beginPath();
   ctx.moveTo(ex, ey);
   ctx.lineTo(ex - ux * 6 - uy * 3, ey - uy * 6 + ux * 3);
@@ -958,7 +986,9 @@ function drawCallEdges(ink) {
     ctx.lineWidth = hot ? 1.5 : 1;
     const [x0, y0] = screenXY(a);
     const [x1, y1] = screenXY(b);
-    callArrow(x0, y0, x1, y1, radii[b]);
+    const ambig = callFanout(a, b) >= 2;
+    if (ambig) callAmbigDrawn = true;
+    callArrow(x0, y0, x1, y1, radii[b], ambig);
   };
   for (const j of S[selected].calls) one(selected, j);
   for (const j of callersOf[selected]) one(j, selected);
@@ -1314,6 +1344,14 @@ function hoverUpdate() {
   }
 }
 
+// A call edge's honest one-liner: the encoding, plus "one of N" when the
+// resolver kept N same-name candidates instead of picking (edge.a is the
+// caller for every call-flavored edge/connector).
+function callEdgeHint(edge) {
+  const fan = callFanout(edge.a, edge.b);
+  return "name-resolved static call · direct only"
+    + (fan >= 2 ? ` · one of ${fan} same-name candidates` : "");
+}
 function tipLine(cls, text) {
   const d = document.createElement("div");
   d.className = cls;
@@ -1333,7 +1371,7 @@ function tooltip() {
     if (connHover.call) {
       // calls connector (TKI-72): direction + encoding, no number, no fetch
       tip.appendChild(tipLine("t-name", `${S[connHover.a].qname} → ${S[connHover.b].qname}`));
-      tip.appendChild(tipLine("t-hint", "name-resolved static call · direct only"));
+      tip.appendChild(tipLine("t-hint", callEdgeHint(connHover)));
       tip.appendChild(tipLine("t-hint", "click to compare side-by-side"));
     } else {
       tip.appendChild(tipLine("t-name", `${S[connHover.a].qname} — ${S[connHover.b].qname}`));
@@ -1343,7 +1381,7 @@ function tooltip() {
   } else if (edgeHover) {
     if (edgeHover.call) {
       tip.appendChild(tipLine("t-name", `${S[edgeHover.a].qname} → ${S[edgeHover.b].qname}`));
-      tip.appendChild(tipLine("t-hint", "name-resolved static call · direct only"));
+      tip.appendChild(tipLine("t-hint", callEdgeHint(edgeHover)));
     } else {
       tip.appendChild(tipLine("t-name", `${S[edgeHover.a].qname} — ${S[edgeHover.b].qname}`));
       tip.appendChild(tipLine("t-terms", `shared: ${edgeTermText(edgeHover)}`));
@@ -1882,7 +1920,9 @@ function drawCallConnSeg(ra, rb, a, b, panel) {
   ctx.fillStyle = ink;
   ctx.globalAlpha = hot ? 0.95 : 0.6;
   ctx.lineWidth = hot ? 1.5 : 1;
-  callArrow(x0, y0, x1, y1, 0);
+  const ambig = callFanout(a, b) >= 2;
+  if (ambig) callAmbigDrawn = true;
+  callArrow(x0, y0, x1, y1, 0, ambig);
   ctx.globalAlpha = 1;
   ctx.lineWidth = 1;
   const seg = {a, b, call: true, x0, y0, x1, y1, lx0: 0, ly0: 0, lx1: -1, ly1: -1};
@@ -3075,6 +3115,9 @@ function initControls() {
     if (!showCalls) {
       if (edgeHover && edgeHover.call) edgeHover = null;
       if (connHover && connHover.call) connHover = null;
+      // a resting cursor gets no mousemove, so the tip must re-render
+      // from the cleared state NOW, not on the next hover pass (#39)
+      tooltip();
     }
     footer();
     scheduleDraw();
