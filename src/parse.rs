@@ -51,11 +51,56 @@ pub struct FnOccurrence<'t> {
     pub sym: SymbolRef,
 }
 
+/// `conftest.py` (TKI-55, any depth) is pytest infrastructure regardless of
+/// its directory or name-prefix: it defines fixtures/hooks for the tests
+/// around it, not production code, but neither of the checks below name it —
+/// it isn't under a `tests`/`test` dir and doesn't start with `test_`.
 pub fn is_test_path(rel: &str) -> bool {
     let lower = rel.to_lowercase();
+    if lower.rsplit('/').next() == Some("conftest.py") {
+        return true;
+    }
     lower.split('/').any(|part| {
         part == "tests" || part == "test" || part.starts_with("test_") || part.ends_with("_test.py")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_test_path;
+
+    #[test]
+    fn root_level_conftest_is_test_infrastructure() {
+        assert!(is_test_path("conftest.py"));
+    }
+
+    #[test]
+    fn nested_conftest_outside_any_tests_dir_is_test_infrastructure() {
+        // TKI-55's own repro: scrapy's root-level and package-level
+        // conftest.py files, none of them under a `tests/` directory.
+        assert!(is_test_path("scrapy/conftest.py"));
+        assert!(is_test_path("pkg/sub/conftest.py"));
+    }
+
+    #[test]
+    fn conftest_under_a_tests_dir_is_still_test_infrastructure() {
+        assert!(is_test_path("tests/integration/conftest.py"));
+    }
+
+    #[test]
+    fn a_name_merely_containing_conftest_is_not_misclassified() {
+        // Only the exact filename `conftest.py` is pytest infrastructure;
+        // a same-prefix production module must not be swept in.
+        assert!(!is_test_path("pkg/conftest_helpers.py"));
+        assert!(!is_test_path("pkg/myconftest.py"));
+    }
+
+    #[test]
+    fn ordinary_production_paths_are_unaffected() {
+        assert!(!is_test_path("pkg/widgets.py"));
+        assert!(is_test_path("pkg/tests/widgets.py"));
+        assert!(is_test_path("pkg/test_widgets.py"));
+    }
 }
 
 pub fn extract_functions<'t>(
