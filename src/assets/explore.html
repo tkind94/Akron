@@ -403,13 +403,23 @@ pre.code {
   white-space: nowrap;
   overflow: hidden;
 }
-#cmpbar .legend { color: var(--dim); margin-left: auto; }
+#cmpbar select {
+  background: var(--bg);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  font: inherit;
+  padding: 2px 6px;
+  max-width: 320px;
+}
+#cmpbar .legend { color: var(--dim); margin-left: auto; display: flex; align-items: center; }
 #cmpempty {
   padding: 4px 10px;
   border-bottom: 1px solid var(--line);
   color: var(--dim);
 }
 #cmppanes { display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
+#cmppanes.pending { opacity: .45; pointer-events: none; transition: opacity 120ms; }
 .cmppane { position: relative; overflow: auto; padding: 8px 10px; }
 .cmppane:first-child { border-right: 1px solid var(--line); }
 .cmppane .panehead { color: var(--dim); margin-bottom: 6px; word-break: break-all; }
@@ -417,6 +427,9 @@ pre.code {
 .cmppane pre { tab-size: 4; line-height: 1.5; }
 .reg { border-radius: 2px; }
 .reg.hot { outline: 1px solid var(--accent); }
+/* legend swatches (TKI-71): the same .reg class + regColor() output the
+   real pane regions use, so the legend can't drift from the rendering */
+.legend .reg { display: inline-block; width: 1em; height: 1em; vertical-align: -0.15em; margin: 0 2px; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
@@ -462,9 +475,10 @@ footer {
   <div id="cmp" hidden>
     <div id="cmpbar">
       <button class="chipbtn" id="cmpclose">✕ close</button>
-      <button class="chipbtn" id="cmppick" title="pick a new B side from the map or search">change comparison</button>
       <span id="cmptitle"></span>
-      <span class="legend">solid — identical after whitespace collapse · dotted — aligned, differs · hover pairs</span>
+      <span class="sep">⟷</span>
+      <select id="cmpbsel" title="compare against"></select>
+      <span class="legend"></span>
     </div>
     <div id="cmpempty" hidden>no structurally shared regions with this symbol</div>
     <div id="cmppanes"></div>
@@ -604,6 +618,20 @@ function neighborsOf(i) {
     return (showTests ? drill.nn[k] : drill.nnp[k]) || [];
   }
   return (showTests ? S[i].nn : S[i].nnp) || [];
+}
+// The card's "nearest layout neighbors" list and the compare dropdown
+// (TKI-71) share this: neighborsOf's mode-matched kNN set, ranked by
+// map-plane distance (closest first — a fact of what is drawn, no model
+// number shown), capped to `cap`.
+function layoutNeighbors(i, cap) {
+  const [sx, sy] = mapXY(S[i]);
+  return neighborsOf(i)
+    .filter(j => visible(S[j]))
+    .map(j => { const [x, y] = mapXY(S[j]); return [Math.hypot(x - sx, y - sy), j]; })
+    .filter(d => isFinite(d[0]))
+    .sort((a, b) => a[0] - b[0])
+    .slice(0, cap)
+    .map(([, j]) => j);
 }
 
 /* ── layout: raw values → normalized [0,1] world coords ── */
@@ -2243,7 +2271,13 @@ async function loadCard(id) {
   cmpBtn.className = "chipbtn";
   cmpBtn.textContent = "compare";
   cmpBtn.title = "side-by-side with the nearest embedding-ranked symbol";
-  cmpBtn.addEventListener("click", () => openCompare(id));
+  cmpBtn.addEventListener("click", () => {
+    // default B = the same nearest layout neighbor the dropdown will mark
+    // "nearest" — one source of truth, so the auto-pick can't drift from
+    // what the dropdown claims it is (#24)
+    const nn = layoutNeighbors(id, 1);
+    openCompare(id, nn.length ? nn[0] : undefined);
+  });
   actions.appendChild(cmpBtn);
   card.appendChild(actions);
 
@@ -2347,18 +2381,12 @@ async function loadCard(id) {
   // single row. Ranked by map-plane distance (a fact of what is drawn); no
   // model numbers shown. Visited ones stay in the list, just marked — the
   // list is a map of the neighborhood, not a to-do queue.
-  const [sx, sy] = mapXY(S[id]);
-  const nearest = neighborsOf(id)
-    .filter(j => visible(S[j]))
-    .map(j => { const [x, y] = mapXY(S[j]); return [Math.hypot(x - sx, y - sy), j]; })
-    .filter(d => isFinite(d[0]))
-    .sort((a, b) => a[0] - b[0])
-    .slice(0, 5);
+  const nearest = layoutNeighbors(id, 5);
   if (nearest.length) {
     card.appendChild(listSection("nearest layout neighbors",
         "closest first · ✓ visited this session", sec => {
       const ul = document.createElement("ul");
-      nearest.forEach(([, j]) => {
+      nearest.forEach(j => {
         const s = S[j];
         const li = refLine({id: s.id, qname: s.qname, file: s.file, line: s.line}, undefined, id);
         if (visited.has(j)) li.classList.add("visited");
@@ -2380,6 +2408,24 @@ function popBack() {
    pair index = color. NO similarity number appears on the panes — the
    card already carries the deterministic A/B cosines. */
 function regColor(i, alpha) { return PALETTE[i % PALETTE.length] + alpha; }
+
+// Legend swatches (TKI-71), rendered not described (#28): built from the
+// exact same .reg class + regColor() a real region uses, so the legend
+// cannot drift from the panes' actual rendering. Static; built once.
+function buildLegend() {
+  const legend = document.querySelector("#cmpbar .legend");
+  const swatch = tier => {
+    const sp = document.createElement("span");
+    sp.className = "reg";
+    sp.style.background = regColor(0, "2e");
+    if (tier === 2) sp.style.borderBottom = `1px dotted ${PALETTE[0]}`;
+    return sp;
+  };
+  legend.append(
+    swatch(1), document.createTextNode(" identical after whitespace collapse · "),
+    swatch(2), document.createTextNode(" aligned, differs"),
+  );
+}
 
 function buildPane(side, regions, key) {
   const pane = document.createElement("div");
@@ -2434,31 +2480,71 @@ function syncScroll(from, to) {
   requestAnimationFrame(() => { syncing = false; });
 }
 
+// The B-side dropdown (TKI-71): A's own top layout neighbors — the same
+// set+ranking as the card's "nearest layout neighbors" — plus the pair
+// actually being shown if it falls outside that set (a connector or a
+// map/panel pick can land anywhere), plus the pick-mode escape hatch.
+// RANK order only; no cosine/score ever appears here (#24, DESIGN.md §1.2).
+const CMP_PICK = "__pick__";
+function populateCompareSelect(aId, bId) {
+  const sel = $("cmpbsel");
+  sel.textContent = "";
+  const seen = new Set();
+  const addOption = (sid, note) => {
+    if (seen.has(sid)) return;
+    seen.add(sid);
+    const s = S[sid];
+    const opt = document.createElement("option");
+    opt.value = String(sid);
+    opt.textContent = `${s.qname} · ${midPath(s.file, 20)}` + (note ? ` — ${note}` : "");
+    sel.appendChild(opt);
+  };
+  const neighbors = layoutNeighbors(aId, 10);
+  neighbors.forEach((nid, i) => addOption(nid, i === 0 ? "nearest" : undefined));
+  if (!seen.has(bId)) addOption(bId, undefined); // honest: show the pair as-is, no false "nearest"
+  const pick = document.createElement("option");
+  pick.value = CMP_PICK;
+  pick.textContent = "pick from map or panel…";
+  sel.appendChild(pick);
+  sel.value = String(bId);
+}
+
 // Sequence-guarded (TKI-68): a connector click compares a pinned pair that
 // need not involve the selection, so staleness is "a newer open or a close
 // happened while this fetch flew", not "the selection moved".
 let cmpSeq = 0;
 async function openCompare(id, bid) {
   const seq = ++cmpSeq;
+  // switching the B side of an already-open compare must paint a pending
+  // state within 100ms (#2) — dim the stale panes rather than freezing them
+  const switching = cmp !== null;
+  if (switching) $("cmppanes").classList.add("pending");
   let j;
   try {
     const r = await fetch(`/api/compare?id=${id}` + (bid !== undefined ? `&b=${bid}` : ""));
     if (!r.ok) throw new Error((await r.json()).error || `HTTP ${r.status}`);
     j = await r.json();
   } catch (e) {
+    if (seq === cmpSeq) {
+      $("cmppanes").classList.remove("pending");
+      // a failed switch reverts the pane; the dropdown must revert with it
+      if (cmp) $("cmpbsel").value = String(cmp.b.id);
+    }
     $("readout").textContent =
       `compare failed — ${e instanceof TypeError ? "server unreachable" : e.message}`;
     return;
   }
   if (seq !== cmpSeq) return; // stale response
   cmp = j;
-  $("cmptitle").textContent = `${j.a.qname} ⟷ ${j.b.qname}`;
+  $("cmptitle").textContent = j.a.qname;
+  populateCompareSelect(j.a.id, j.b.id);
   // honest empty state (TKI-66): the alignment found no structural
   // agreement — say so; the tier legend would describe nothing
   $("cmpempty").hidden = j.regions.length > 0;
   document.querySelector("#cmpbar .legend").hidden = j.regions.length === 0;
   const panes = $("cmppanes");
   panes.textContent = "";
+  panes.classList.remove("pending");
   const pa = buildPane(j.a, j.regions, "a");
   const pb = buildPane(j.b, j.regions, "b");
   panes.append(pa, pb);
@@ -2491,6 +2577,7 @@ function closeCompare() {
   cmp = null;
   $("cmp").hidden = true;
   $("cmppanes").textContent = "";
+  $("cmppanes").classList.remove("pending");
 }
 
 /* ── compare pick mode (TKI-66): swap the B side from the map/search ── */
@@ -2502,7 +2589,10 @@ function startPick() {
 }
 function cancelPick() {
   picking = -1;
-  if (cmp) $("cmp").hidden = false; // back to the overlay as it was
+  if (cmp) {
+    $("cmp").hidden = false; // back to the overlay as it was
+    $("cmpbsel").value = String(cmp.b.id); // undo the dropdown's "pick…" selection
+  }
   footer();
 }
 
@@ -2772,6 +2862,7 @@ function renderGuide() {
 function initControls() {
   document.title = `akron explore — ${BOOT.repo}`;
   breadcrumb();
+  buildLegend();
   for (const selId of ["ax", "ay"]) {
     const sel = $(selId);
     for (const a of AXES) {
@@ -2911,7 +3002,11 @@ function initControls() {
     drillUp();
   });
   $("cmpclose").addEventListener("click", closeCompare);
-  $("cmppick").addEventListener("click", startPick);
+  $("cmpbsel").addEventListener("change", () => {
+    const v = $("cmpbsel").value;
+    if (v === CMP_PICK) { startPick(); return; }
+    openCompare(cmp.a.id, +v);
+  });
   canvas.addEventListener("wheel", e => {
     e.preventDefault();
     const f = Math.exp(-e.deltaY * 0.0015);
