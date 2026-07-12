@@ -1434,11 +1434,17 @@ function removeBoard(b) {
     const [x, y] = key.split(":").map(Number);
     if (x === b.id || y === b.id) manualPairs.delete(key);
   }
+  // TKI-70: the card (and any hovered inline link in it) is gone with no
+  // mouseleave — e.g. the Esc ladder removes the newest board out from
+  // under a stationary cursor. Unconditional clear; over-clearing across
+  // an unrelated board is harmless (#39).
+  linkHover = -1;
   scheduleDraw();
 }
 function minimizeBoard(b) {
   b.min = true;
   b.el.style.display = "none";
+  linkHover = -1; // TKI-70: same orphaned-highlight guard as removeBoard
   const chip = document.createElement("span");
   chip.className = "bchip";
   chip.textContent = S[b.id].qname;
@@ -1612,7 +1618,14 @@ function drawBoards(W, H, accent, dimInk) {
   const rects = new Map(); // id -> screen rect + its dot's screen position
   for (const b of boards) {
     if (b.min) continue;
-    if (!visible(S[b.id])) { b.el.style.display = "none"; continue; } // out of scope: card waits
+    if (!visible(S[b.id])) {
+      // TKI-70: the card is about to vanish (out of scope) — same
+      // orphaned-highlight guard as removeBoard, but only on the actual
+      // hide transition, not every frame it stays hidden.
+      if (b.el.style.display !== "none") linkHover = -1;
+      b.el.style.display = "none";
+      continue; // out of scope: card waits
+    }
     if (b.el.style.display === "none") { b.el.style.display = ""; measureBoard(b); }
     const [dx, dy] = screenXY(b.id);
     const r = placeBoard(b, dx, dy, W, H, [...rects.values()]);
