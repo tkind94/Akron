@@ -195,9 +195,19 @@ chip, or a path segment on the card (that is a point's route to its file)
 to re-run the layout over just
 that subset — its internal structure gets the whole plane, colors re-key
 to subdirectories (classes inside a file). The topbar breadcrumb always
-answers "where am I"; every ancestor is clickable, Escape climbs one
+answers "where am I"; every ancestor is clickable and climbs to that
 level, selecting anything outside the drill exits to the whole-repo map.
 Deterministic like the launch layout (seeded from the global coordinates).
+**Unselect (TKI-80):** clicking empty canvas, clicking the already-selected
+dot again, or the panel's own ✕ all clear the selection and close the
+panel — exploration needs an easy way back to nothing selected, not only
+a way in. Escape's ladder unwinds transient state innermost-first (search
+hitlist, compare pick mode, the compare overlay, the newest pinned board)
+and then, with nothing transient left, clears the selection. It no longer
+climbs the drill or walks back-history: those already have dedicated,
+visible controls — the breadcrumb's ancestor segments and the "← back"
+chip — so Escape's one job (get back to nothing) stays legible instead of
+doubling as a silent, stateful back button.
 **Living boards (TKI-68):** rest on a point and a peek card blooms with
 its first lines; click pins it as a board card that rides pan/zoom,
 anchored to its dot (soft cap 6 — the oldest minimizes to a chip). Pinned
@@ -209,10 +219,10 @@ dismisses the newest card; the side panel stays the deep dossier.
 it sprouts its name, then its signature; deeper still it blooms an
 ambient code card (first lines, capped by what the viewport holds, never
 by repo size), and neighbor cards connect with vocabulary-labeled lines.
-Clicking always falls through to the dot (pin + select as above). The
-"zoom drills" toggle (off by default) makes a committed deep zoom over a
-labeled island open it and a committed far zoom-out climb back; labels
-and path segments drill regardless.
+Clicking always falls through to the dot (pin + select as above); labels
+and path segments are the only way to drill — an earlier zoom-triggered
+auto-drill was removed (TKI-80: CEO review — hard to trigger on purpose,
+too easy to trigger by accident).
 **Guidance:** with nothing selected the panel lists factual starting
 points for the current scope — largest dirs/files, most-called symbols,
 last touched — each row a click; a selected card ends with its 5 nearest
