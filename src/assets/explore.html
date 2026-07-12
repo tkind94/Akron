@@ -144,6 +144,10 @@ body {
 }
 .chip .dot { width: 8px; height: 8px; border-radius: 50%; }
 .chip.on { border-color: var(--accent); color: var(--ink); }
+/* drill affordance (TKI-68): the chip's click means focus, so descent gets
+   its own visible glyph — no double-click anywhere */
+.chip .drill { cursor: pointer; padding: 0 3px; }
+.chip .drill:hover { color: var(--accent); }
 /* the branch chip: accent glyph instead of a dir color dot */
 .chip.branch .glyph { color: var(--accent); font-weight: 700; }
 
@@ -172,6 +176,93 @@ main.hasSel { grid-template-columns: 1fr minmax(420px, 46%); }
 #tip .t-loc { color: var(--dim); word-break: break-all; }
 #tip .t-terms { color: var(--accent); word-break: break-all; }
 #tip .t-hint { color: var(--dim); }
+
+/* ── peek card (TKI-68): dwell on a dot blooms a small code window;
+   pointer-events: none — it discloses, the click underneath commits ── */
+#peek {
+  position: absolute;
+  z-index: 16;
+  pointer-events: none;
+  width: 320px;
+  overflow: hidden;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  box-shadow: 0 6px 18px rgba(0,0,0,.35);
+  opacity: 1;
+  transition: opacity .12s ease-out;
+}
+#peek[hidden] { display: none; }
+#peek .pk-head { padding: 4px 8px; border-bottom: 1px solid var(--line); }
+#peek .t-name { font-weight: 700; word-break: break-all; }
+#peek .t-loc { color: var(--dim); word-break: break-all; }
+#peek .t-terms { color: var(--accent); word-break: break-all; }
+#peek pre.code {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  max-height: 150px;
+  overflow: hidden;
+  font-size: 11px;
+  padding: 6px 8px;
+}
+#peek .pk-more { color: var(--dim); padding: 2px 8px 4px; }
+
+/* ── board cards (TKI-68): pinned code windows anchored to their dots ── */
+.board {
+  position: absolute;
+  z-index: 12;
+  width: 340px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  box-shadow: 0 6px 18px rgba(0,0,0,.4);
+}
+.board.big { width: 520px; }
+.board.droptarget { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 6px 18px rgba(0,0,0,.4); }
+.board .bhead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px 3px 8px;
+  border-bottom: 1px solid var(--line);
+  cursor: grab;
+  user-select: none;
+}
+.board .bhead:active { cursor: grabbing; }
+.board .bname { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.board .bloc { color: var(--dim); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.board .bact { color: var(--dim); cursor: pointer; min-width: 24px; padding: 4px 0; text-align: center; }
+.board .bact:hover { color: var(--accent); }
+.board pre.code { margin: 0; border: none; border-radius: 0; max-height: 240px; font-size: 11px; }
+.board.big pre.code { max-height: 60vh; }
+.board .bwait { color: var(--dim); padding: 6px 8px; }
+
+/* minimized boards dock as chips (soft cap: the oldest card yields) */
+#btray {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 12;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+  max-width: 50%;
+}
+#btray .bchip {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 1px 8px;
+  cursor: pointer;
+  color: var(--dim);
+  max-width: 180px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#btray .bchip:hover { color: var(--accent); border-color: var(--accent); }
 
 /* ── side panel ── */
 #panel {
@@ -348,7 +439,7 @@ footer {
 </header>
 <div id="chips"></div>
 <main>
-  <div id="stage"><canvas id="map"></canvas><div id="tip" hidden></div></div>
+  <div id="stage"><canvas id="map"></canvas><div id="tip" hidden></div><div id="peek" hidden></div><div id="btray"></div></div>
   <aside id="panel"><div class="empty" id="card">no selection — click a symbol</div></aside>
   <div id="cmp" hidden>
     <div id="cmpbar">
@@ -382,7 +473,7 @@ const AXES = [
   {id:"pca4", label:"PCA-5"}, {id:"pca5", label:"PCA-6"},
   {id:"pca6", label:"PCA-7"}, {id:"pca7", label:"PCA-8"},
 ];
-const DEFAULT_HINT = "drag pan · wheel zoom · click select · double-click a dot/label opens its file/dir · esc back / drill up";
+const DEFAULT_HINT = "drag pan · wheel zoom · click select + pin its card · click a dir label/▸ to open it · esc back / drill up";
 
 let S = [];                 // /api/symbols
 let META = {pca_var: [], labels: {prod: [], full: []}}; // /api/meta
@@ -401,11 +492,22 @@ let visited = new Set();    // ids selected this session (guidance: "next")
 let navStack = [];          // back-history of selections (viewer loop, TKI-61)
 let cmp = null;             // /api/compare payload while the overlay is open
 let picking = -1;           // compare pick mode (TKI-66): the A-side id, or -1
-let labelBoxes = [];        // dir labels placed this frame, for dblclick drill
+let labelBoxes = [];        // dir labels placed this frame, for single-click drill
 let mouse = null;           // last cursor position; hover hit-tests run per rAF
 let edgeHover = null;       // {a, b} — the labeled layout edge under the cursor
 let hoverLabel = null;      // the drillable island label under the cursor
 const edgeTerms = new Map(); // "lo:hi" -> shared terms (/api/edge, cached)
+/* living boards (TKI-68) */
+const srcCache = new Map(); // id -> /api/source payload (null = in flight)
+let boards = [];            // pinned board cards, pin order: {id, el, min, chip, w, h}
+const manualPairs = new Set(); // header-drag connections, "lo:hi" like edgeTerms
+let connSegs = [];          // board connector hit bands, rebuilt each draw
+let connHover = null;       // {a, b} — the board connector under the cursor
+let dragConn = null;        // header drag in progress: {from, x, y, over}
+let peekId = -1;            // the peek card's symbol, or -1
+let peekWait = -1, peekDwellT = 0, peekHideT = 0;
+const BOARD_CAP = 6;
+const PEEK_DWELL = 300, PEEK_GRACE = 200, PEEK_LINES = 12;
 let mode = "map";           // map | anchor | time | axes
 let axisX = "map_x", axisY = "map_y";
 let px, py;                 // Float64Array world coords in [0,1]
@@ -522,6 +624,7 @@ function centerOn(id) {
   const [bx, by] = baseXY(id);
   view.tx = canvas.clientWidth / 2 - bx * view.k;
   view.ty = canvas.clientHeight / 2 - by * view.k;
+  peekCancel(); // the map moved under the cursor; no orphaned peek (#39)
   scheduleDraw();
 }
 
@@ -653,6 +756,12 @@ function draw() {
     ctx.stroke();
   }
 
+  // board cards + connectors (TKI-68): placed from screenXY in this same
+  // rAF pass as the dots — one transform source of truth; leader lines
+  // and connectors can never lag or detach from their cards.
+  connSegs = [];
+  if (boards.length) drawBoards(W, H, accent, dimInk);
+
   // captions: per view, real numbers only
   ctx.fillStyle = dimInk;
   ctx.font = "11px ui-monospace, Menlo, monospace";
@@ -770,6 +879,7 @@ function timeTicks(lo, hi) {
 /* ── views ── */
 async function applyMode(m) {
   mode = m;
+  peekCancel(); // every point moves; no orphaned peek (#39)
   if (m === "map") { axisX = "map_x"; axisY = "map_y"; }
   else if (m === "anchor") { axisX = "anchor_a"; axisY = "anchor_b"; }
   else if (m === "time") { axisX = "recency"; axisY = "map_y"; }
@@ -808,6 +918,7 @@ let drillSeq = 0;
 // coordinates); the page swaps scope: chips, labels, breadcrumb, planes.
 async function drillTo(path) {
   const seq = ++drillSeq;
+  peekCancel(); // the plane is about to swap under the cursor (#39)
   if (!path) {
     drill = null;
   } else {
@@ -953,14 +1064,15 @@ function nearestEdge(i, mx, my) {
 function sameEdge(a, b) { return (!a && !b) || (a && b && a.a === b.a && a.b === b.b); }
 
 // Fetch-once cache for /api/edge — the shared Channel-B vocabulary that a
-// layout edge is made of. Refreshes the tooltip when the answer lands.
+// layout edge is made of. Refreshes the tooltip and the board connector
+// labels when the answer lands (optimistic "…" until then).
 function ensureEdgeTerms(e) {
   const key = e.a < e.b ? `${e.a}:${e.b}` : `${e.b}:${e.a}`;
   if (edgeTerms.has(key)) return;
   edgeTerms.set(key, null); // in flight
   fetch(`/api/edge?a=${e.a}&b=${e.b}`)
     .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
-    .then(j => { edgeTerms.set(key, j.terms || []); tooltip(); })
+    .then(j => { edgeTerms.set(key, j.terms || []); tooltip(); scheduleDraw(); })
     .catch(() => edgeTerms.delete(key));
 }
 function edgeTermText(e) {
@@ -971,29 +1083,34 @@ function edgeTermText(e) {
 }
 
 // One hover pass per animation frame: point first (existing hit rule), then
-// drillable island labels, then the selection's edge lines.
+// board connectors, then drillable island labels, then the selection's
+// edge lines.
 function hoverUpdate() {
   if (!mouse) return;
   const h = nearest(mouse.x, mouse.y);
-  let lb = null, edge = null;
-  if (mode === "map" && h < 0) {
+  let lb = null, edge = null, conn = null;
+  if (h < 0) conn = connectorAt(mouse.x, mouse.y);
+  if (mode === "map" && h < 0 && !conn) {
     lb = labelBoxes.find(b =>
       b.path && mouse.x >= b.x0 && mouse.x <= b.x1 && mouse.y >= b.y0 && mouse.y <= b.y1) || null;
   }
   if (mode === "map" && selected >= 0 && visible(S[selected])) {
     if (h >= 0 && h !== selected && neighborsOf(selected).includes(h)) {
       edge = {a: selected, b: h}; // hovering a neighbor endpoint labels its edge
-    } else if (h < 0 && !lb) {
+    } else if (h < 0 && !lb && !conn) {
       const j = nearestEdge(selected, mouse.x, mouse.y);
       if (j >= 0) edge = {a: selected, b: j};
     }
   }
-  const changed = h !== hovered || !sameEdge(edge, edgeHover) || lb !== hoverLabel;
+  const changed = h !== hovered || !sameEdge(edge, edgeHover) ||
+                  lb !== hoverLabel || !sameEdge(conn, connHover);
   hovered = h;
   edgeHover = edge;
   hoverLabel = lb;
-  canvas.style.cursor = h >= 0 ? "pointer" : lb ? "zoom-in" : "default";
+  connHover = conn;
+  canvas.style.cursor = h >= 0 || conn ? "pointer" : lb ? "zoom-in" : "default";
   if (edge) ensureEdgeTerms(edge);
+  peekUpdate(h);
   tooltip();
   if (changed) {
     footer();
@@ -1007,28 +1124,25 @@ function tipLine(cls, text) {
   d.textContent = text;
   return d;
 }
-// The cursor tooltip: symbol identity (+ its edge's shared terms when the
-// cursor rides an edge or a neighbor endpoint) or a drill hint for island
-// labels. Facts only; pointer-events: none so it never blocks a click.
+// The cursor tooltip: edge / connector / island-label identity only —
+// point hover blooms the peek card instead (TKI-68), and the footer
+// carries point identity in the same frame. Facts only; pointer-events:
+// none so it never blocks a click.
 function tooltip() {
   const tip = $("tip");
-  if (!mouse) { tip.hidden = true; return; }
+  updatePeekTerms();
+  if (!mouse || hovered >= 0) { tip.hidden = true; return; }
   tip.textContent = "";
-  if (hovered >= 0) {
-    const s = S[hovered];
-    tip.appendChild(tipLine("t-name", s.qname));
-    tip.appendChild(tipLine("t-loc", `${s.file}:${s.line}`));
-    tip.appendChild(tipLine("t-loc", `dir ${dirOf(s)}`));
-    if (edgeHover) {
-      tip.appendChild(tipLine("t-terms", `shared with ${S[edgeHover.a].qname} — ${edgeTermText(edgeHover)}`));
-    }
-    tip.appendChild(tipLine("t-hint", `double-click opens ${s.file}`));
+  if (connHover) {
+    tip.appendChild(tipLine("t-name", `${S[connHover.a].qname} — ${S[connHover.b].qname}`));
+    tip.appendChild(tipLine("t-terms", `shared: ${edgeTermText(connHover)}`));
+    tip.appendChild(tipLine("t-hint", "click to compare side-by-side"));
   } else if (edgeHover) {
     tip.appendChild(tipLine("t-name", `${S[edgeHover.a].qname} — ${S[edgeHover.b].qname}`));
     tip.appendChild(tipLine("t-terms", `shared: ${edgeTermText(edgeHover)}`));
   } else if (hoverLabel) {
     tip.appendChild(tipLine("t-name", hoverLabel.path));
-    tip.appendChild(tipLine("t-hint", `double-click to open ${hoverLabel.path}`));
+    tip.appendChild(tipLine("t-hint", `click to open ${hoverLabel.path}`));
   } else {
     tip.hidden = true;
     return;
@@ -1040,6 +1154,422 @@ function tooltip() {
   if (y + tip.offsetHeight > st.clientHeight - 4) y = Math.max(4, mouse.y - tip.offsetHeight - 10);
   tip.style.left = x + "px";
   tip.style.top = y + "px";
+}
+
+/* ── peek card (TKI-68): dwell on a dot blooms a small code window ──
+   Hovercard engineering (Wikipedia/GitHub): dwell before show, grace
+   before hide, exactly one peek, edge-flip positioning. pointer-events:
+   none — the peek discloses, the click underneath commits (pin+select).
+   Source payloads cache per id like edgeTerms; a fast sweep across dots
+   fires ZERO fetches because nothing dwells long enough. */
+function ensureSource(id) {
+  if (srcCache.has(id)) return;
+  srcCache.set(id, null); // in flight
+  fetch(`/api/source?id=${id}`)
+    .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+    .then(j => { srcCache.set(id, j); onSourceReady(id); })
+    .catch(() => {
+      srcCache.delete(id);
+      const b = boardFor(id);
+      if (b) fillBoard(b, true);
+      if (peekId === id) hidePeek();
+    });
+}
+function onSourceReady(id) {
+  if (peekId === id) fillPeek(id);
+  const b = boardFor(id);
+  if (b) { fillBoard(b); scheduleDraw(); }
+}
+function lineCount(text) {
+  let n = 1;
+  for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) n++;
+  if (text.endsWith("\n")) n--;
+  return n;
+}
+// First-N-lines cut that never splits a highlight span: a token that
+// straddles the cut (a multi-line string/comment) pulls the cut to its own
+// end, then on to the next line boundary, until stable. Offsets are UTF-16
+// exactly like toks; cuts land right after a newline (or at end-of-text),
+// never inside a surrogate pair or a token span.
+function peekCut(src, maxLines) {
+  const text = src.text;
+  let cut = 0;
+  for (let lines = 0; lines < maxLines; lines++) {
+    const nl = text.indexOf("\n", cut);
+    if (nl < 0) return text.length;
+    cut = nl + 1;
+  }
+  let moved = true;
+  while (moved && cut < text.length) {
+    moved = false;
+    for (const t of src.toks) {
+      if (t[0] < cut && t[1] > cut) { cut = t[1]; moved = true; }
+    }
+    if (moved) {
+      const nl = text.indexOf("\n", cut);
+      cut = nl < 0 ? text.length : nl + 1;
+    }
+  }
+  return cut;
+}
+function showPeek(id) {
+  peekId = id;
+  const s = S[id];
+  const pk = $("peek");
+  pk.textContent = "";
+  const head = document.createElement("div");
+  head.className = "pk-head";
+  head.appendChild(tipLine("t-name", s.qname));
+  head.appendChild(tipLine("t-loc", `${s.file}:${s.line}`));
+  const terms = tipLine("t-terms", "");
+  terms.hidden = true;
+  head.appendChild(terms);
+  pk.appendChild(head);
+  const body = document.createElement("div");
+  body.className = "pk-body";
+  pk.appendChild(body);
+  pk.hidden = false;
+  fillPeek(id); // cached source renders now; a pending mark otherwise (#2)
+  updatePeekTerms();
+  ensureSource(id);
+}
+function fillPeek(id) {
+  const body = $("peek").querySelector(".pk-body");
+  if (!body) return;
+  body.textContent = "";
+  const src = srcCache.get(id);
+  if (!src) {
+    const wait = document.createElement("div");
+    wait.className = "pk-more";
+    wait.textContent = "…";
+    body.appendChild(wait);
+    positionPeek();
+    return;
+  }
+  const cut = peekCut(src, PEEK_LINES);
+  // drop a bare trailing newline, but never shave a span that owns it
+  const end = cut > 0 && src.text[cut - 1] === "\n" &&
+    !src.toks.some(t => t[0] <= cut - 1 && t[1] > cut - 1) ? cut - 1 : cut;
+  const pre = document.createElement("pre");
+  pre.className = "code";
+  emitToks(pre, src.text, src.toks, 0, end, false);
+  body.appendChild(pre);
+  const more = document.createElement("div");
+  more.className = "pk-more";
+  if (cut < src.text.length) {
+    let shown = 0;
+    for (let i = 0; i < cut; i++) if (src.text.charCodeAt(i) === 10) shown++;
+    more.textContent = `… ${lineCount(src.text) - shown} more lines · click pins the card`;
+  } else {
+    more.textContent = "click pins the card";
+  }
+  body.appendChild(more);
+  positionPeek();
+}
+function positionPeek() {
+  if (peekId < 0 || !mouse) return;
+  const pk = $("peek"), st = $("stage");
+  let x = mouse.x + 14, y = mouse.y + 14;
+  if (x + pk.offsetWidth > st.clientWidth - 4) x = Math.max(4, mouse.x - pk.offsetWidth - 10);
+  if (y + pk.offsetHeight > st.clientHeight - 4) y = Math.max(4, mouse.y - pk.offsetHeight - 10);
+  pk.style.left = x + "px";
+  pk.style.top = y + "px";
+}
+// When the hovered dot is a neighbor endpoint of the selection, the peek
+// carries the edge's shared vocabulary (the tip used to; the peek owns
+// point hover now). Refreshed when /api/edge lands, via tooltip().
+function updatePeekTerms() {
+  if (peekId < 0) return;
+  const t = $("peek").querySelector(".t-terms");
+  if (!t) return;
+  if (edgeHover && (edgeHover.a === peekId || edgeHover.b === peekId)) {
+    const other = edgeHover.a === peekId ? edgeHover.b : edgeHover.a;
+    t.textContent = `shared with ${S[other].qname} — ${edgeTermText(edgeHover)}`;
+    t.hidden = false;
+  } else {
+    t.hidden = true;
+  }
+}
+function hidePeek() {
+  peekId = -1;
+  $("peek").hidden = true;
+}
+// Dwell-debounce: the peek shows only after the cursor RESTS on a dot;
+// leaving grace-hides against flicker; switching dots kills the old peek
+// at once (exactly one peek). #39: no orphaned transient state.
+function peekUpdate(h) {
+  const want = h >= 0 && !boardFor(h) ? h : -1; // a pinned card outranks its peek
+  if (want === peekId) {
+    if (peekHideT) { clearTimeout(peekHideT); peekHideT = 0; }
+    if (peekWait >= 0) { clearTimeout(peekDwellT); peekWait = -1; }
+    return;
+  }
+  if (want >= 0) {
+    if (peekHideT) { clearTimeout(peekHideT); peekHideT = 0; }
+    if (peekId >= 0) hidePeek();
+    if (want !== peekWait) {
+      clearTimeout(peekDwellT);
+      peekWait = want;
+      peekDwellT = setTimeout(() => { peekWait = -1; showPeek(want); }, PEEK_DWELL);
+    }
+  } else {
+    clearTimeout(peekDwellT);
+    peekWait = -1;
+    if (peekId >= 0 && !peekHideT) {
+      peekHideT = setTimeout(() => { peekHideT = 0; hidePeek(); }, PEEK_GRACE);
+    }
+  }
+}
+function peekCancel() {
+  clearTimeout(peekDwellT);
+  peekWait = -1;
+  if (peekHideT) { clearTimeout(peekHideT); peekHideT = 0; }
+  if (peekId >= 0) hidePeek();
+}
+
+/* ── board cards (TKI-68): a click pins the peek as a live card ──
+   Real DOM over the canvas, re-anchored to its dot every frame from
+   screenXY — cards ride pan/zoom, clamped to the viewport with a leader
+   line stretching to the off-screen dot. The side panel stays the deep
+   dossier; the board is the quick read. Purely additive to select(). */
+function pairKey(a, b) { return a < b ? `${a}:${b}` : `${b}:${a}`; }
+function boardFor(id) { return boards.find(b => b.id === id); }
+function toggleBoard(id) {
+  const b = boardFor(id);
+  if (b) { removeBoard(b); return; } // clicking the dot again unpins
+  const act = boards.filter(x => !x.min);
+  if (act.length >= BOARD_CAP) minimizeBoard(act[0]); // oldest yields a chip
+  const el = buildBoardEl(id);
+  $("stage").appendChild(el);
+  const nb = {id, el, min: false, chip: null, w: 0, h: 0};
+  boards.push(nb);
+  fillBoard(nb);
+  ensureSource(id);
+  peekCancel(); // the peek promotes to the card
+  scheduleDraw();
+}
+function removeBoard(b) {
+  boards.splice(boards.indexOf(b), 1);
+  b.el.remove();
+  if (b.chip) b.chip.remove();
+  for (const key of [...manualPairs]) {
+    const [x, y] = key.split(":").map(Number);
+    if (x === b.id || y === b.id) manualPairs.delete(key);
+  }
+  scheduleDraw();
+}
+function minimizeBoard(b) {
+  b.min = true;
+  b.el.style.display = "none";
+  const chip = document.createElement("span");
+  chip.className = "bchip";
+  chip.textContent = S[b.id].qname;
+  chip.title = `restore ${S[b.id].qname}`;
+  chip.addEventListener("click", () => restoreBoard(b));
+  $("btray").appendChild(chip);
+  b.chip = chip;
+  scheduleDraw();
+}
+function restoreBoard(b) {
+  const act = boards.filter(x => !x.min && x !== b);
+  if (act.length >= BOARD_CAP) minimizeBoard(act[0]);
+  b.min = false;
+  b.el.style.display = "";
+  if (b.chip) { b.chip.remove(); b.chip = null; }
+  boards.splice(boards.indexOf(b), 1);
+  boards.push(b); // restored = newest; esc pops it first
+  measureBoard(b);
+  scheduleDraw();
+}
+function buildBoardEl(id) {
+  const s = S[id];
+  const el = document.createElement("div");
+  el.className = "board";
+  el.dataset.id = id;
+  const head = document.createElement("div");
+  head.className = "bhead";
+  head.title = "drag onto another card to connect";
+  const name = document.createElement("span");
+  name.className = "bname";
+  name.textContent = s.qname;
+  name.title = s.qname;
+  const loc = document.createElement("span");
+  loc.className = "bloc";
+  loc.textContent = `${midPath(s.file, 24)}:${s.line}`;
+  loc.title = `${s.file}:${s.line}`;
+  const grow = document.createElement("span");
+  grow.className = "bact";
+  grow.textContent = "⤢";
+  grow.title = "expand";
+  grow.addEventListener("click", e => {
+    e.stopPropagation();
+    el.classList.toggle("big");
+    grow.title = el.classList.contains("big") ? "shrink" : "expand";
+    const b = boardFor(id);
+    if (b) measureBoard(b);
+    scheduleDraw();
+  });
+  const x = document.createElement("span");
+  x.className = "bact";
+  x.textContent = "✕";
+  x.title = "dismiss";
+  x.addEventListener("click", e => {
+    e.stopPropagation();
+    const b = boardFor(id);
+    if (b) removeBoard(b);
+  });
+  head.append(name, loc, grow, x);
+  head.addEventListener("mousedown", e => {
+    if (e.target.closest(".bact")) return;
+    e.preventDefault();
+    startConnDrag(id, e);
+  });
+  el.appendChild(head);
+  const body = document.createElement("div");
+  body.className = "bbody";
+  el.appendChild(body);
+  // the card's code scrolls; the map behind it must not zoom
+  el.addEventListener("wheel", e => e.stopPropagation());
+  return el;
+}
+function fillBoard(b, err) {
+  const body = b.el.querySelector(".bbody");
+  body.textContent = "";
+  const src = srcCache.get(b.id);
+  if (err) {
+    const d = document.createElement("div");
+    d.className = "bwait";
+    d.textContent = "source failed — dismiss and re-pin to retry";
+    body.appendChild(d);
+  } else if (!src) {
+    const d = document.createElement("div");
+    d.className = "bwait";
+    d.textContent = "…";
+    body.appendChild(d);
+  } else {
+    body.appendChild(renderCode(src, true)); // identifier links stay live
+  }
+  measureBoard(b);
+}
+function measureBoard(b) {
+  if (b.el.style.display === "none") return;
+  b.w = b.el.offsetWidth;
+  b.h = b.el.offsetHeight;
+}
+function startConnDrag(id, e) {
+  const st = $("stage").getBoundingClientRect();
+  dragConn = {from: id, x: e.clientX - st.left, y: e.clientY - st.top, over: -1};
+  scheduleDraw();
+}
+
+/* ── connectors (TKI-68): live labeled lines between pinned cards ──
+   Layout-neighbor pairs connect automatically; a header drag connects any
+   pair (/api/edge answers any pair). Labels are shared vocabulary TERMS,
+   never a score or cosine (DESIGN.md §1.2). Drawn card-edge to card-edge
+   in the same rAF pass that places the cards. */
+function rectEdgePoint(r, tx, ty) {
+  const cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+  const dx = tx - cx, dy = ty - cy;
+  if (!dx && !dy) return [cx, cy];
+  const sx = dx ? (r.w / 2) / Math.abs(dx) : Infinity;
+  const sy = dy ? (r.h / 2) / Math.abs(dy) : Infinity;
+  const s = Math.min(sx, sy);
+  return [cx + dx * s, cy + dy * s];
+}
+// The connector under the cursor: a 24px band around the line (#19), or
+// its midpoint label box.
+function connectorAt(mx, my) {
+  let best = null, bestD = 12;
+  for (const c of connSegs) {
+    if (mx >= c.lx0 && mx <= c.lx1 && my >= c.ly0 && my <= c.ly1) return c;
+    const dx = c.x1 - c.x0, dy = c.y1 - c.y0;
+    const len2 = dx * dx + dy * dy;
+    const t = len2 ? Math.max(0, Math.min(1, ((mx - c.x0) * dx + (my - c.y0) * dy) / len2)) : 0;
+    const d = Math.hypot(mx - (c.x0 + t * dx), my - (c.y0 + t * dy));
+    if (d < bestD) { bestD = d; best = c; }
+  }
+  return best;
+}
+function drawBoards(W, H, accent, dimInk) {
+  const panel = cssVar("--panel");
+  const rects = new Map(); // id -> screen rect + its dot's screen position
+  for (const b of boards) {
+    if (b.min) continue;
+    if (!visible(S[b.id])) { b.el.style.display = "none"; continue; } // out of scope: card waits
+    if (b.el.style.display === "none") { b.el.style.display = ""; measureBoard(b); }
+    const [dx, dy] = screenXY(b.id);
+    let x = dx + 14;
+    if (x + b.w > W - 4) x = dx - 14 - b.w;
+    x = Math.max(4, Math.min(x, W - b.w - 4));
+    const y = Math.max(4, Math.min(dy - 18, H - b.h - 4));
+    b.el.style.left = x + "px";
+    b.el.style.top = y + "px";
+    rects.set(b.id, {x, y, w: b.w, h: b.h, dx, dy});
+  }
+  // leader: dot → nearest card corner, skipped when the dot sits under it
+  ctx.strokeStyle = dimInk;
+  ctx.lineWidth = 1;
+  ctx.globalAlpha = 0.6;
+  for (const r of rects.values()) {
+    if (r.dx >= r.x && r.dx <= r.x + r.w && r.dy >= r.y && r.dy <= r.y + r.h) continue;
+    ctx.beginPath();
+    ctx.moveTo(r.dx, r.dy);
+    ctx.lineTo(r.dx < r.x + r.w / 2 ? r.x : r.x + r.w,
+               r.dy < r.y + r.h / 2 ? r.y : r.y + r.h);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  // connectors: card-edge to card-edge, vocabulary label at the midpoint
+  const ids = [...rects.keys()];
+  ctx.font = "10px ui-monospace, Menlo, monospace";
+  for (let i = 0; i < ids.length; i++) {
+    for (let j = i + 1; j < ids.length; j++) {
+      const lo = Math.min(ids[i], ids[j]), hi = Math.max(ids[i], ids[j]);
+      if (!manualPairs.has(pairKey(lo, hi)) &&
+          !neighborsOf(lo).includes(hi) && !neighborsOf(hi).includes(lo)) continue;
+      ensureEdgeTerms({a: lo, b: hi}); // cached: one fetch per pair, ever
+      const ra = rects.get(ids[i]), rb = rects.get(ids[j]);
+      const [x0, y0] = rectEdgePoint(ra, rb.x + rb.w / 2, rb.y + rb.h / 2);
+      const [x1, y1] = rectEdgePoint(rb, ra.x + ra.w / 2, ra.y + ra.h / 2);
+      const hot = sameEdge(connHover, {a: lo, b: hi});
+      ctx.globalAlpha = hot ? 0.95 : 0.5;
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = hot ? 1.5 : 1;
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      let lab = edgeTermText({a: lo, b: hi});
+      if (lab.length > 44) lab = lab.slice(0, 43) + "…";
+      const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+      const tw = ctx.measureText(lab).width;
+      ctx.globalAlpha = 0.92;
+      ctx.fillStyle = panel;
+      ctx.fillRect(mx - tw / 2 - 4, my - 8, tw + 8, 15);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = accent;
+      ctx.textAlign = "center";
+      ctx.fillText(lab, mx, my + 3);
+      ctx.textAlign = "start";
+      connSegs.push({a: lo, b: hi, x0, y0, x1, y1,
+                     lx0: mx - tw / 2 - 4, ly0: my - 8, lx1: mx + tw / 2 + 4, ly1: my + 7});
+    }
+  }
+  // drag-to-connect: dashed provisional line; commit happens on release
+  if (dragConn && rects.has(dragConn.from)) {
+    const [x0, y0] = rectEdgePoint(rects.get(dragConn.from), dragConn.x, dragConn.y);
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 1.5;
+    ctx.globalAlpha = 0.9;
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(dragConn.x, dragConn.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+  }
 }
 
 /* ── selection: the anchor ── */
@@ -1459,7 +1989,12 @@ function syncScroll(from, to) {
   requestAnimationFrame(() => { syncing = false; });
 }
 
+// Sequence-guarded (TKI-68): a connector click compares a pinned pair that
+// need not involve the selection, so staleness is "a newer open or a close
+// happened while this fetch flew", not "the selection moved".
+let cmpSeq = 0;
 async function openCompare(id, bid) {
+  const seq = ++cmpSeq;
   let j;
   try {
     const r = await fetch(`/api/compare?id=${id}` + (bid !== undefined ? `&b=${bid}` : ""));
@@ -1470,7 +2005,7 @@ async function openCompare(id, bid) {
       `compare failed — ${e instanceof TypeError ? "server unreachable" : e.message}`;
     return;
   }
-  if (id !== selected) return; // stale response
+  if (seq !== cmpSeq) return; // stale response
   cmp = j;
   $("cmptitle").textContent = `${j.a.qname} ⟷ ${j.b.qname}`;
   // honest empty state (TKI-66): the alignment found no structural
@@ -1506,6 +2041,7 @@ async function openCompare(id, bid) {
 }
 function closeCompare() {
   picking = -1;
+  cmpSeq++; // any in-flight open lands stale
   if (!cmp) return;
   cmp = null;
   $("cmp").hidden = true;
@@ -1592,8 +2128,8 @@ function runSearch(q) {
 
 /* ── boot ── */
 // Legend chips for the current scope: the drill re-keys colors, so chips
-// rebuild on every drill change. Click = focus fade; dblclick = drill in
-// (when the key is a path).
+// rebuild on every drill change. Click = focus fade; the ▸ glyph = drill
+// in (when the key is a path).
 function buildChips() {
   const counts = new Map();
   for (const s of S) {
@@ -1619,10 +2155,19 @@ function buildChips() {
       chip.classList.toggle("on");
       scheduleDraw();
     });
+    // descent is a visible glyph, not a double-click (TKI-68): the chip's
+    // click already means focus-fade
     const target = drillTarget(dir);
     if (target) {
-      chip.title = `double-click to open ${target}`;
-      chip.addEventListener("dblclick", () => drillTo(target));
+      const go = document.createElement("span");
+      go.className = "drill";
+      go.textContent = "▸";
+      go.title = `open ${target}`;
+      go.addEventListener("click", e => {
+        e.stopPropagation();
+        drillTo(target);
+      });
+      chip.appendChild(go);
     }
     chips.appendChild(chip);
   });
@@ -1844,13 +2389,28 @@ function initControls() {
   canvas.addEventListener("mousedown", e => {
     dragging = true; moved = 0; lastX = e.offsetX; lastY = e.offsetY;
   });
+  // single click does it all (TKI-68, double-click is dead): a dot pins
+  // its board card AND selects; a board connector opens the compare; a
+  // dir label drills. Pick mode narrows a click to choosing the B side.
   window.addEventListener("mouseup", e => {
     if (!dragging) return;
     dragging = false;
-    if (moved < 4) {
-      const id = nearest(e.target === canvas ? e.offsetX : lastX,
-                         e.target === canvas ? e.offsetY : lastY);
-      if (id >= 0) select(id, false);
+    if (moved >= 4) return;
+    const mx = e.target === canvas ? e.offsetX : lastX;
+    const my = e.target === canvas ? e.offsetY : lastY;
+    const id = nearest(mx, my);
+    if (id >= 0) {
+      if (picking < 0) toggleBoard(id);
+      select(id, false);
+      return;
+    }
+    if (picking >= 0) return; // picking wants a dot, nothing else
+    const c = connectorAt(mx, my);
+    if (c) { openCompare(c.a, c.b); return; }
+    if (mode === "map") {
+      const b = labelBoxes.find(b =>
+        b.path && mx >= b.x0 && mx <= b.x1 && my >= b.y0 && my <= b.y1);
+      if (b) drillTo(b.path);
     }
   });
   // hover hit-tests (point, edge, island label) run at most once per
@@ -1863,6 +2423,7 @@ function initControls() {
       view.tx += dx; view.ty += dy;
       lastX = e.offsetX; lastY = e.offsetY;
       $("tip").hidden = true;
+      peekCancel(); // panning is not dwelling (#39)
       scheduleDraw();
       return;
     }
@@ -1872,30 +2433,25 @@ function initControls() {
   canvas.addEventListener("mouseleave", () => {
     mouse = null;
     $("tip").hidden = true;
-    if (hovered !== -1 || edgeHover || hoverLabel) {
+    peekUpdate(-1); // grace-hide; a re-entry within the grace keeps it
+    if (hovered !== -1 || edgeHover || hoverLabel || connHover) {
       hovered = -1;
       edgeHover = null;
       hoverLabel = null;
+      connHover = null;
       footer();
       scheduleDraw();
     }
   });
-  // drill gestures: dblclick a dir label = drill into that dir; dblclick a
-  // point = drill into its file; Escape = up one level (hitlist first)
-  canvas.addEventListener("dblclick", e => {
-    if (mode === "map") {
-      const b = labelBoxes.find(b =>
-        b.path && e.offsetX >= b.x0 && e.offsetX <= b.x1 && e.offsetY >= b.y0 && e.offsetY <= b.y1);
-      if (b) { drillTo(b.path); return; }
-    }
-    const id = nearest(e.offsetX, e.offsetY);
-    if (id >= 0 && (!drill || drill.path !== S[id].file)) drillTo(S[id].file);
-  });
+  // Escape ladder: transient state unwinds innermost-first — hitlist,
+  // pick mode, compare, the newest board card (TKI-68), back-history,
+  // then the drill climbs one level
   document.addEventListener("keydown", e => {
     if (e.key !== "Escape" || e.target === $("search")) return;
     if (!$("hitlist").hidden) { $("hitlist").hidden = true; return; }
     if (picking >= 0) { cancelPick(); return; }
     if (cmp) { closeCompare(); return; }
+    if (boards.length) { removeBoard(boards[boards.length - 1]); return; }
     if (navStack.length) { popBack(); return; }
     drillUp();
   });
@@ -1909,8 +2465,40 @@ function initControls() {
     view.tx = mx - (mx - view.tx) * (k2 / view.k);
     view.ty = my - (my - view.ty) * (k2 / view.k);
     view.k = k2;
+    // the map moved under a resting cursor: re-run the hover pass so the
+    // tip/peek can't orphan on a dot that zoomed away (#39)
+    mouse = {x: mx, y: my};
+    if (!hoverRaf) hoverRaf = requestAnimationFrame(() => { hoverRaf = 0; hoverUpdate(); });
     scheduleDraw();
   }, {passive: false});
+
+  // drag-to-connect (TKI-68): from a card header onto another card; the
+  // target rings while hovered (visible drop affordance), the connector
+  // commits on release — a half-gesture commits nothing (#35)
+  document.addEventListener("mousemove", e => {
+    if (!dragConn) return;
+    const st = $("stage").getBoundingClientRect();
+    dragConn.x = e.clientX - st.left;
+    dragConn.y = e.clientY - st.top;
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const bEl = el && el.closest ? el.closest(".board") : null;
+    const over = bEl && +bEl.dataset.id !== dragConn.from ? +bEl.dataset.id : -1;
+    if (over !== dragConn.over) {
+      for (const b of boards) b.el.classList.toggle("droptarget", b.id === over);
+      dragConn.over = over;
+    }
+    scheduleDraw();
+  });
+  document.addEventListener("mouseup", () => {
+    if (!dragConn) return;
+    if (dragConn.over >= 0) {
+      manualPairs.add(pairKey(dragConn.from, dragConn.over));
+      ensureEdgeTerms({a: dragConn.from, b: dragConn.over});
+    }
+    for (const b of boards) b.el.classList.remove("droptarget");
+    dragConn = null;
+    scheduleDraw();
+  });
 
   new ResizeObserver(() => scheduleDraw()).observe($("stage"));
   if (window.matchMedia) {
