@@ -98,6 +98,117 @@ fn ambiguous_name_lists_candidates_and_exits_2() {
     );
 }
 
+// ── TKI-74: facts (corpus-grounded prevalence) ──
+
+#[test]
+fn facts_line_states_shape_and_family_prevalence_against_fixtures() {
+    // parse_records' repeated-shape cluster is 3 members (itself, the
+    // renamed exact clone, the near-miss) across 3 files; its pattern family
+    // additionally pulls in the drifted variant, 4 members across 4 files —
+    // the two altitudes DESIGN.md §3.1 distinguishes, both already-computed.
+    let out = run("parse_records");
+    assert!(out.status.success(), "exit code: {:?}", out.status);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(
+            "facts       shape 3 members across 3 files \u{b7} name \"parse_records\" corpus-unique \u{b7} family F1 4 members across 4 files"
+        ),
+        "facts line must state shape and family prevalence, in that order:\n{stdout}"
+    );
+}
+
+#[test]
+fn facts_line_states_name_prevalence_even_when_shape_is_unique() {
+    // to_dict is planted twice (todict_core.py, todict_member.py) with
+    // deliberately different bodies (no shared shape or family), so this
+    // isolates the name-prevalence fact from the shape-prevalence fact.
+    let out = run("todict_core.py:1");
+    assert!(out.status.success(), "exit code: {:?}", out.status);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(
+            "facts       shape corpus-unique \u{b7} name \"to_dict\" shared by 2 corpus symbols"
+        ),
+        "facts line must report the name collision even without a shape/family match:\n{stdout}"
+    );
+    let facts_line = stdout.lines().find(|l| l.starts_with("facts")).unwrap();
+    assert!(
+        !facts_line.contains("family"),
+        "no family section for a symbol with no family membership:\n{facts_line}"
+    );
+}
+
+#[test]
+fn constructor_name_prevalence_keys_off_the_class_not_dunder_init() {
+    // Every class defines an `__init__`, so counting occurrences of the
+    // literal name "__init__" would be a near-universal, useless number.
+    // The fact must key off the class name instead (mirrors `call_targets`'s
+    // own constructor join) — two classes both named `Widget` (different
+    // files) share that count; `Gadget`, defined once, is corpus-unique.
+    let dir = tempfile::Builder::new()
+        .prefix("akron-explain-test-")
+        .tempdir()
+        .expect("tempdir");
+    let pkg = dir.path().join("pkg");
+    fs::create_dir_all(&pkg).unwrap();
+    fs::write(
+        pkg.join("a.py"),
+        "class Widget:\n    def __init__(self, x):\n        self.x = x\n        return x\n",
+    )
+    .unwrap();
+    fs::write(
+        pkg.join("b.py"),
+        "class Widget:\n    def __init__(self, y, z):\n        self.y = y\n        self.z = z\n        total = y + z\n        return total\n",
+    )
+    .unwrap();
+    fs::write(
+        pkg.join("c.py"),
+        "class Gadget:\n    def __init__(self, q):\n        self.q = q\n        return q\n",
+    )
+    .unwrap();
+
+    let out = run_in(dir.path(), "pkg/a.py:2");
+    assert!(out.status.success(), "exit code: {:?}", out.status);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("name \"Widget\" shared by 2 corpus symbols"),
+        "must key the count off the class name, not \"__init__\":\n{stdout}"
+    );
+
+    let out = run_in(dir.path(), "pkg/c.py:2");
+    assert!(out.status.success(), "exit code: {:?}", out.status);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("name \"Gadget\" corpus-unique"),
+        "a singly-defined class's constructor must not inherit every other class's __init__ count:\n{stdout}"
+    );
+}
+
+#[test]
+fn facts_line_reports_corpus_unique_shape_and_name_for_a_lone_symbol() {
+    let dir = tempfile::Builder::new()
+        .prefix("akron-explain-test-")
+        .tempdir()
+        .expect("tempdir");
+    let pkg = dir.path().join("pkg");
+    fs::create_dir_all(&pkg).unwrap();
+    fs::write(
+        pkg.join("a.py"),
+        "def lonely_fn(a, b, c):\n    total = a + b\n    total += c\n    return total\n",
+    )
+    .unwrap();
+
+    let out = run_in(dir.path(), "lonely_fn");
+    assert!(out.status.success(), "exit code: {:?}", out.status);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let facts_line = stdout.lines().find(|l| l.starts_with("facts")).unwrap();
+    assert_eq!(
+        facts_line,
+        "facts       shape corpus-unique \u{b7} name \"lonely_fn\" corpus-unique",
+        "a wholly unmatched symbol must report both prevalence facts as 1, with no family part:\n{stdout}"
+    );
+}
+
 // ── TKI-42: entry-point tag (salvaged from R&D archive spike/orient) ──
 
 #[test]
