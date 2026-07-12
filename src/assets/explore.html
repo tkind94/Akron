@@ -449,8 +449,9 @@ pre.code {
 /* ── about this view (TKI-81): one discoverable place that teaches the
    current view — the layout, the encodings, their limits — in full
    sentences, replacing the caption nuggets that used to ride the canvas.
-   Bottom-left corner (#20), never over the data. ── */
-#about { position: absolute; left: 8px; bottom: 8px; z-index: 14; }
+   Top-right corner (#20) — the bottom corners belong to the axis values
+   and the board tray, and the top-left to the search hitlist. ── */
+#about { position: absolute; right: 8px; top: 8px; z-index: 14; text-align: right; }
 #aboutBtn {
   display: inline-block;
   background: var(--panel);
@@ -464,9 +465,10 @@ pre.code {
 #aboutBtn:hover, #about.open #aboutBtn { color: var(--accent); border-color: var(--accent); }
 #aboutPop {
   position: absolute;
-  left: 0;
-  bottom: calc(100% + 6px);
+  right: 0;
+  top: calc(100% + 6px);
   width: 360px;
+  text-align: left;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 4px;
