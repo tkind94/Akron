@@ -211,14 +211,17 @@ doubling as a silent, stateful back button.
 **Living boards (TKI-68):** rest on a point and a peek card blooms with
 its first lines; click pins it as a board card that rides pan/zoom,
 anchored to its dot (soft cap 6 — the oldest minimizes to a chip). Pinned
-neighbors connect card-to-card with lines labeled by their shared
-vocabulary — terms, never a number; click a line for the side-by-side, or
+neighbors connect card-to-card; hovering a line names the pair and their
+shared vocabulary — terms, never a number (TKI-79 moved the labels off
+the map and into the hover tip); click a line for the side-by-side, or
 drag one card's header onto another to wire an arbitrary pair. Escape
 dismisses the newest card; the side panel stays the deep dossier.
 **Semantic zoom (TKI-69):** zoom is disclosure — a dot with room around
 it sprouts its name, then its signature; deeper still it blooms an
 ambient code card (first lines, capped by what the viewport holds, never
-by repo size), and neighbor cards connect with vocabulary-labeled lines.
+by repo size — and a card that would land on another skips its turn, so
+dense regions thin to chips instead of walling up; TKI-78/79), and
+neighbor cards connect with lines whose shared vocabulary shows on hover.
 Clicking always falls through to the dot (pin + select as above); labels
 and path segments are the only way to drill — an earlier zoom-triggered
 auto-drill was removed (TKI-80: CEO review — hard to trigger on purpose,
@@ -236,15 +239,24 @@ the map while the row is hovered (a dashed halo with crosshair ticks,
 distinct from the selection/search/branch rings). A row whose symbol
 isn't drawn in the current scope says so on hover instead of highlighting
 anything; it never auto-pans or auto-drills.
-**Calls channel (TKI-72):** the `calls` toggle in the topbar overlays
-directed call arrows — name-resolved static calls, direct only, the same
-import-aware edge set the card's callers/callees lists show — for the
-selected symbol (both directions) and between pinned board cards (their
-connectors say "calls", distinct from the vocabulary-term labels). Arrows
-are structure, not similarity: a different color and an arrowhead, never
-confusable with the layout-neighbor edges, and never drawn all-pairs at
-repo zoom. Hovering an arrow names the pair and the encoding; dynamic
-dispatch (`handlers[name](...)`) stays invisible, exactly as J9 states.
+**Calls channel (TKI-72, chains in TKI-79):** the `calls` dropdown in the
+topbar overlays directed call arrows — name-resolved static calls, direct
+only, the same import-aware edge set the card's callers/callees lists
+show — walked 1, 2, or 3 hops out from the selected symbol in both
+directions (on at one hop by default; `off` stays a choice for a quieter
+map), and between pinned board cards. Callee-direction arrows are amber, caller-direction violet, and
+each hop past the first draws fainter, so a chain reads as a gradient
+away from the selection; hop-2+ endpoints wear a thin ring in their
+direction's hue. Arrows are structure, not similarity: arrowheads and
+their own hues, never confusable with the layout-neighbor edges (which
+recede while a call graph is drawn), and never drawn all-pairs at repo
+zoom. Hovering an arrow names the pair, the encoding, and its hop
+distance; an ambiguous same-name call stays dashed at every depth; capped
+fan-outs say how many edges are not drawn. Dynamic dispatch
+(`handlers[name](...)`) stays invisible, exactly as J9 states. Connector
+labels — the vocabulary terms between cards, and "calls" — live in the
+hover tip rather than floating at rest: at rest the map draws no term
+labels at all.
 
 ## CLI-surface principles (binding)
 
