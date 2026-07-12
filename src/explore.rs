@@ -1132,6 +1132,16 @@ fn explain_json(state: &ExploreState, id: usize) -> Value {
             "last": history::fmt_date(d.last_touched),
             "activity": d.activity.label(),
         })),
+        "facts": {
+            "shape_members": c.facts.shape_members,
+            "shape_files": c.facts.shape_files,
+            "name_key": c.facts.name_key,
+            "name_count": c.facts.name_count,
+            // Pre-rendered clauses (TKI-77): `explain::fact_lines` is the
+            // single formatter both the CLI card and this panel call — the
+            // panel joins these with " · " and gets the CLI's exact words.
+            "lines": explain::fact_lines(&c.facts, c.family.as_ref()),
+        },
         "clones": {
             "exact": c.exact_clones.iter().map(|&i| sym_ref(state, i)).collect::<Vec<_>>(),
             "near": c.near_clones.iter().map(|&(i, cos)| {

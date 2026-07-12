@@ -299,6 +299,7 @@ main.hasSel { grid-template-columns: 1fr minmax(420px, 46%); }
 #panel .loc .pathseg:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
 #panel .meta { margin-top: 3px; }
 #panel .meta .k { color: var(--dim); }
+#panel .facts { margin-top: 3px; color: var(--dim); word-break: break-word; }
 #panel section { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
 #panel h3 {
   font-size: 10px;
@@ -2491,6 +2492,13 @@ async function loadCard(id) {
     meta.appendChild(el);
   });
   card.appendChild(meta);
+
+  // corpus-grounded prevalence (TKI-74/77): the CLI card's own words,
+  // rendered from `explain::fact_lines` server-side — no reformatting here
+  const facts = document.createElement("div");
+  facts.className = "facts";
+  facts.textContent = c.facts.lines.join(" · ");
+  card.appendChild(facts);
 
   // actions: retrace jumps, open the side-by-side (TKI-61)
   const actions = document.createElement("div");
