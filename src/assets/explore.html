@@ -2087,13 +2087,14 @@ function refLine(ref, extra, cmpA) {
   bindRowLink(li, ref.id);
   return li;
 }
-/* ── row → map hover linking (TKI-70): every panel row that names a symbol
-   highlights that symbol's dot on the map while the row is hovered — pure
-   client state, the row already carries the id, so this never fetches
-   (#1). If the symbol isn't drawn in the current scope (drilled out, or a
-   test with tests hidden) the row hints instead of silently no-op'ing;
-   it does not auto-pan or auto-drill (#21). Leaving the row cancels the
-   highlight immediately (#39). ── */
+/* ── row → map hover linking (TKI-70): any element that names a symbol —
+   a panel row, or an inline code-viewer identifier link — highlights that
+   symbol's dot on the map while it's hovered. Pure client state, the
+   element already carries the id, so this never fetches (#1). If the
+   symbol isn't drawn in the current scope (drilled out, or a test with
+   tests hidden) it hints instead of silently no-op'ing; it does not
+   auto-pan or auto-drill (#21). Leaving cancels the highlight
+   immediately (#39). ── */
 function bindRowLink(li, id) {
   const baseTitle = li.title;
   li.addEventListener("mouseenter", () => {
@@ -2137,6 +2138,7 @@ function emitToks(el, text, toks, from, to, links) {
       sp.classList.add("lnk");
       sp.title = `${S[t[3]].qname} — ${S[t[3]].file}:${S[t[3]].line}`;
       sp.addEventListener("click", () => select(t[3], true));
+      bindRowLink(sp, t[3]); // TKI-70: same map-highlight as panel rows
     }
     el.appendChild(sp);
     pos = e;
