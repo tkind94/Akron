@@ -841,11 +841,14 @@ fn render_card(analysis: &Analysis, cfg: &Config, target: usize) -> Result<()> {
 
     // ── facts: corpus-grounded prevalence — always printed, like role
     // twins/callers/callees below (a base rate of 1 is itself a fact) ──
+    let files_word = |n: u32| if n == 1 { "file" } else { "files" };
     let mut fact_parts = vec![
         if data.facts.shape_members > 1 {
             format!(
-                "shape {} members across {} files",
-                data.facts.shape_members, data.facts.shape_files
+                "shape {} members across {} {}",
+                data.facts.shape_members,
+                data.facts.shape_files,
+                files_word(data.facts.shape_files)
             )
         } else {
             "shape corpus-unique".to_string()
@@ -861,10 +864,11 @@ fn render_card(analysis: &Analysis, cfg: &Config, target: usize) -> Result<()> {
     ];
     if let Some(f) = &data.family {
         fact_parts.push(format!(
-            "family F{} {} members across {} files",
+            "family F{} {} members across {} {}",
             f.index + 1,
             f.members,
-            f.n_files
+            f.n_files,
+            files_word(f.n_files as u32)
         ));
     }
     println!("facts       {}", fact_parts.join(" \u{b7} "));

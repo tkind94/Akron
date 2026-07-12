@@ -118,6 +118,21 @@ fn facts_line_states_shape_and_family_prevalence_against_fixtures() {
 }
 
 #[test]
+fn facts_line_uses_singular_file_when_span_is_one() {
+    // AlphaSuite.run's clone cluster and family live entirely inside
+    // role_guard_classes.py — the span must read "1 file", never "1 files".
+    let out = run("role_guard_classes.py:31");
+    assert!(out.status.success(), "exit code: {:?}", out.status);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(
+            "facts       shape 2 members across 1 file \u{b7} name \"run\" shared by 3 corpus symbols \u{b7} family F3 3 members across 1 file"
+        ),
+        "single-file spans must use the singular:\n{stdout}"
+    );
+}
+
+#[test]
 fn facts_line_states_name_prevalence_even_when_shape_is_unique() {
     // to_dict is planted twice (todict_core.py, todict_member.py) with
     // deliberately different bodies (no shared shape or family), so this
