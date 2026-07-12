@@ -553,6 +553,32 @@ pub struct CardFamily {
     pub index: usize,
     pub is_core: bool,
     pub cos_to_core: f32,
+    /// Total family membership (this symbol included) — prevalence of the
+    /// broader pattern, not just this symbol's own core/drift status.
+    pub members: u32,
+    pub n_files: usize,
+}
+
+/// Corpus-grounded prevalence (TKI-74): how common this symbol's shape and
+/// name are, so the reader can weigh everything else on the card against a
+/// base rate instead of reading each finding in isolation. Both counts
+/// include `target` itself (a lone symbol is "1 member" of its own shape,
+/// not zero) — every number here is hand-verifiable: `shape_members`/
+/// `shape_files` against the same repeated cluster `clones` is read from,
+/// `name_count` by grepping `def {name_key}` across the corpus.
+pub struct CardFacts {
+    /// Size of `target`'s repeated-shape cluster (`analysis.repeated`); 1
+    /// when the shape appears nowhere else in the corpus.
+    pub shape_members: u32,
+    /// Distinct files that cluster spans; 1 alongside `shape_members == 1`.
+    pub shape_files: u32,
+    /// The name actually counted: the class name for an `__init__` (mirrors
+    /// `call_targets`'s constructor join — "`__init__`" itself is near-
+    /// universal and not a meaningful prevalence signal), else the base name.
+    pub name_key: String,
+    /// How many corpus symbols (any file) are defined under `name_key`;
+    /// includes `target`. 1 means the name is corpus-unique.
+    pub name_count: u32,
 }
 
 /// Everything the explain card states about one symbol — the same facts
@@ -564,6 +590,7 @@ pub struct Card {
     pub dating: Option<history::ClusterDates>,
     /// `Some(n)` when this symbol is its directory's entry (in-degree n).
     pub entry: Option<u32>,
+    pub facts: CardFacts,
     /// Same tight cluster, identical Merkle root; sorted by (file, line).
     pub exact_clones: Vec<usize>,
     /// Same tight cluster, different root, with Channel-A cosine; sorted by
@@ -588,15 +615,29 @@ pub fn card(analysis: &Analysis, indeg: &[u32], target: usize) -> Card {
         .and_then(|h| history::cluster_dating(symbols, &[target as u32], h.anchor));
     let entry = entry_point_tag(symbols, indeg, target);
 
+    // `base_name_counts` is needed both for the corpus-name prevalence fact
+    // below and for the callers/callees noise gate further down — computed
+    // once and shared, per this module's own precedent (`indeg` above).
+    let name_counts = base_name_counts(symbols);
+
     // Clones: this symbol's tight repeated-shape cluster, split exact
     // (identical Merkle root) vs near (same cluster, different root).
     let mut exact: Vec<usize> = Vec::new();
     let mut near: Vec<(usize, f32)> = Vec::new();
+    let mut shape_members: u32 = 1;
+    let mut shape_files: u32 = 1;
     if let Some(cluster) = analysis
         .repeated
         .iter()
         .find(|c| c.members.contains(&(target as u32)))
     {
+        shape_members = cluster.members.len() as u32;
+        shape_files = cluster
+            .members
+            .iter()
+            .map(|&m| symbols[m as usize].sym.file.as_str())
+            .collect::<HashSet<_>>()
+            .len() as u32;
         let target_merkle = symbols[target].merkle_root;
         for &m in &cluster.members {
             let m = m as usize;
@@ -645,7 +686,6 @@ pub fn card(analysis: &Analysis, indeg: &[u32], target: usize) -> Card {
     // Callers / callees: direct call edges only (see module doc).
     // `is_real_edge` additionally excludes unresolved-module calls whose
     // base name isn't corpus-unique — the generic-verb noise fix.
-    let name_counts = base_name_counts(symbols);
     let s_file = symbols[target].sym.file.as_str();
     let (mut callers, mut callees) = (Vec::new(), Vec::new());
     for (i, other) in symbols.iter().enumerate() {
@@ -683,13 +723,28 @@ pub fn card(analysis: &Analysis, indeg: &[u32], target: usize) -> Card {
                     index: fi,
                     is_core: m.is_core,
                     cos_to_core: m.cos_to_core,
+                    members: f.members.len() as u32,
+                    n_files: f.n_files,
                 })
         });
+
+    // Name prevalence: the class name for an `__init__` (mirrors
+    // `call_targets`'s own constructor join), else the base name.
+    let target_qname = &symbols[target].sym.qname;
+    let name_key = class_of_init(target_qname).unwrap_or_else(|| base_name(target_qname));
+    let name_count = name_counts.get(name_key).copied().unwrap_or(1);
+    let facts = CardFacts {
+        shape_members,
+        shape_files,
+        name_key: name_key.to_string(),
+        name_count,
+    };
 
     Card {
         target,
         dating,
         entry,
+        facts,
         exact_clones: exact,
         near_clones: near,
         twins,
@@ -783,6 +838,40 @@ fn render_card(analysis: &Analysis, cfg: &Config, target: usize) -> Result<()> {
         "{}:{}  {}  ({} nodes{}{})",
         s.file, s.line, s.qname, symbols[target].node_count, entry_tag, dating
     );
+
+    // ── facts: corpus-grounded prevalence — always printed, like role
+    // twins/callers/callees below (a base rate of 1 is itself a fact) ──
+    let files_word = |n: u32| if n == 1 { "file" } else { "files" };
+    let mut fact_parts = vec![
+        if data.facts.shape_members > 1 {
+            format!(
+                "shape {} members across {} {}",
+                data.facts.shape_members,
+                data.facts.shape_files,
+                files_word(data.facts.shape_files)
+            )
+        } else {
+            "shape corpus-unique".to_string()
+        },
+        if data.facts.name_count > 1 {
+            format!(
+                "name {:?} shared by {} corpus symbols",
+                data.facts.name_key, data.facts.name_count
+            )
+        } else {
+            format!("name {:?} corpus-unique", data.facts.name_key)
+        },
+    ];
+    if let Some(f) = &data.family {
+        fact_parts.push(format!(
+            "family F{} {} members across {} {}",
+            f.index + 1,
+            f.members,
+            f.n_files,
+            files_word(f.n_files as u32)
+        ));
+    }
+    println!("facts       {}", fact_parts.join(" \u{b7} "));
 
     // ── clones: omitted entirely when the symbol has none ──
     let mut parts = Vec::new();
