@@ -111,7 +111,7 @@ fn facts_line_states_shape_and_family_prevalence_against_fixtures() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains(
-            "facts       shape 3 members across 3 files \u{b7} name \"parse_records\" corpus-unique \u{b7} family F1 4 members across 4 files"
+            "facts       one of 3 symbols with this shape, across 3 files; the only symbol named \"parse_records\"; one of 4 members in family F1, across 4 files"
         ),
         "facts line must state shape and family prevalence, in that order:\n{stdout}"
     );
@@ -126,9 +126,9 @@ fn facts_line_uses_singular_file_when_span_is_one() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains(
-            "facts       shape 2 members across 1 file \u{b7} name \"run\" shared by 3 corpus symbols \u{b7} family F3 3 members across 1 file"
+            "facts       one of 2 symbols with this shape, in the same file; one of 3 named \"run\"; one of 3 members in family F3, in the same file"
         ),
-        "single-file spans must use the singular:\n{stdout}"
+        "single-file spans must read \"in the same file\", never \"across 1 files\":\n{stdout}"
     );
 }
 
@@ -142,7 +142,7 @@ fn facts_line_states_name_prevalence_even_when_shape_is_unique() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains(
-            "facts       shape corpus-unique \u{b7} name \"to_dict\" shared by 2 corpus symbols"
+            "facts       one of 2 named \"to_dict\"; the only symbol with this shape"
         ),
         "facts line must report the name collision even without a shape/family match:\n{stdout}"
     );
@@ -186,7 +186,7 @@ fn constructor_name_prevalence_keys_off_the_class_not_dunder_init() {
     assert!(out.status.success(), "exit code: {:?}", out.status);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("name \"Widget\" shared by 2 corpus symbols"),
+        stdout.contains("one of 2 named \"Widget\""),
         "must key the count off the class name, not \"__init__\":\n{stdout}"
     );
 
@@ -194,7 +194,7 @@ fn constructor_name_prevalence_keys_off_the_class_not_dunder_init() {
     assert!(out.status.success(), "exit code: {:?}", out.status);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("name \"Gadget\" corpus-unique"),
+        stdout.contains("the only symbol named \"Gadget\""),
         "a singly-defined class's constructor must not inherit every other class's __init__ count:\n{stdout}"
     );
 }
@@ -219,7 +219,7 @@ fn facts_line_reports_corpus_unique_shape_and_name_for_a_lone_symbol() {
     let facts_line = stdout.lines().find(|l| l.starts_with("facts")).unwrap();
     assert_eq!(
         facts_line,
-        "facts       shape corpus-unique \u{b7} name \"lonely_fn\" corpus-unique",
+        "facts       nothing else in the corpus shares this shape or name",
         "a wholly unmatched symbol must report both prevalence facts as 1, with no family part:\n{stdout}"
     );
 }

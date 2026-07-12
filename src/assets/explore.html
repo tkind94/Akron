@@ -446,6 +446,39 @@ pre.code {
   * { transition: none !important; }
 }
 
+/* ── about this view (TKI-81): one discoverable place that teaches the
+   current view — the layout, the encodings, their limits — in full
+   sentences, replacing the caption nuggets that used to ride the canvas.
+   Top-right corner (#20) — the bottom corners belong to the axis values
+   and the board tray, and the top-left to the search hitlist. ── */
+#about { position: absolute; right: 8px; top: 8px; z-index: 14; text-align: right; }
+#aboutBtn {
+  display: inline-block;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 1px 8px;
+  color: var(--dim);
+  cursor: pointer;
+  user-select: none;
+}
+#aboutBtn:hover, #about.open #aboutBtn { color: var(--accent); border-color: var(--accent); }
+#aboutPop {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  width: 360px;
+  text-align: left;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 8px 10px;
+  box-shadow: 0 6px 18px rgba(0,0,0,.35);
+}
+#aboutPop[hidden] { display: none; }
+#aboutPop p { margin: 0 0 7px; }
+#aboutPop p:last-child { margin-bottom: 0; }
+
 /* ── footer ── */
 footer {
   padding: 3px 10px;
@@ -464,7 +497,7 @@ footer {
   <span id="count"></span>
   <div id="searchwrap">
     <input id="search" type="text" spellcheck="false" autocomplete="off"
-           placeholder="find — type a question, 3+ chars">
+           placeholder="find a name, or ask a question">
     <div id="hitlist" hidden></div>
   </div>
   <nav id="views">
@@ -478,7 +511,7 @@ footer {
     <label>y <select id="ay"></select></label>
   </span>
   <label><input type="checkbox" id="tests"> tests</label>
-  <label id="callsLbl" title="follow the chain of calls around the selection — callers and callees, this many hops out; static name-resolved calls, no dynamic dispatch">calls <select id="calls">
+  <label id="callsLbl" title="Follow calls around the selected symbol, out to this many hops. Amber arrows point at what it calls; violet arrows come from what calls it. Farther hops draw fainter, and a dashed arrow means the name matched several candidates. Only static, name-resolved calls are traced — dynamic dispatch is invisible.">calls <select id="calls">
     <option value="0">off</option>
     <option value="1" selected>1 hop</option>
     <option value="2">2 hops</option>
@@ -487,8 +520,8 @@ footer {
 </header>
 <div id="chips"></div>
 <main>
-  <div id="stage"><canvas id="map"></canvas><div id="tip" hidden></div><div id="peek" hidden></div><div id="btray"></div></div>
-  <aside id="panel"><div class="empty" id="card">no selection — click a symbol</div></aside>
+  <div id="stage"><canvas id="map"></canvas><div id="tip" hidden></div><div id="peek" hidden></div><div id="btray"></div><div id="about"><div id="aboutPop" hidden></div><span id="aboutBtn">about this view</span></div></div>
+  <aside id="panel"><div class="empty" id="card">loading…</div></aside>
   <div id="cmp" hidden>
     <div id="cmpbar">
       <button class="chipbtn" id="cmpclose">✕ close</button>
@@ -497,7 +530,7 @@ footer {
       <select id="cmpbsel" title="compare against"></select>
       <span class="legend"></span>
     </div>
-    <div id="cmpempty" hidden>no structurally shared regions with this symbol</div>
+    <div id="cmpempty" hidden>no structural overlap between these two — pick another symbol to compare</div>
     <div id="cmppanes"></div>
   </div>
 </main>
@@ -512,8 +545,8 @@ const PALETTE = ["#7fb3d9","#dba25e","#66b298","#c78bb1","#9d8fd6","#d3766f",
 
 const AXES = [
   {id:"map_x", label:"map x"}, {id:"map_y", label:"map y"},
-  {id:"anchor_a", label:"structure sim → anchor (A)"},
-  {id:"anchor_b", label:"vocabulary sim → anchor (B)"},
+  {id:"anchor_a", label:"structure similarity to the anchor"},
+  {id:"anchor_b", label:"vocabulary similarity to the anchor"},
   {id:"age", label:"age (first seen)"},
   {id:"recency", label:"recency (last touched)"},
   {id:"file", label:"file order"},
@@ -522,7 +555,6 @@ const AXES = [
   {id:"pca4", label:"PCA-5"}, {id:"pca5", label:"PCA-6"},
   {id:"pca6", label:"PCA-7"}, {id:"pca7", label:"PCA-8"},
 ];
-const DEFAULT_HINT = "drag pan · wheel zoom · click select + pin its card, click again or empty canvas to unselect · click a dir label/▸ to open it · esc clears selection";
 
 let S = [];                 // /api/symbols
 let META = {pca_var: [], labels: {prod: [], full: []}}; // /api/meta
@@ -726,7 +758,6 @@ function draw() {
   const dimInk = cssVar("--dim"), selInk = cssVar("--sel"), accent = cssVar("--accent");
   const linkInk = cssVar("--link");
   const focus = focusDirs.size > 0;
-  callAmbigDrawn = callSelDrawn = callConnDrawn = false; // recomputed by this frame's call-edge passes
 
   // time view: date gridlines under the points
   if (mode === "time" && isFinite(ext.x[0]) && ext.x[1] > ext.x[0]) {
@@ -903,65 +934,44 @@ function draw() {
     lodTimer = setTimeout(drainLod, LOD.settle);
   }
 
-  // captions: per view, real numbers only
+  // axis labels (TKI-81): endpoint values at the ends of each axis and the
+  // measure's name alongside — the DATA the old captions carried, placed
+  // where axis labels belong. What a view means and how it is computed
+  // moved to "about this view"; the map itself no longer captions every
+  // frame. The capped-call-edge count moved to the footer (see footer()).
   ctx.fillStyle = dimInk;
   ctx.font = "11px ui-monospace, Menlo, monospace";
-  if (mode === "map") {
-    let cap = `map · ${BOOT.k}-nearest-neighbor layout · cosine over embeddings`;
-    if (drill) cap += ` · drill: ${drill.path} · ${drill.ids.length} of ${BOOT.count} symbols`;
-    if (selected >= 0 && visible(S[selected])) cap += " · edges: selection's layout neighbors";
-    // the calls channel's legend line (#28): what the arrows are — and are
-    // not — including the honest count when the server or the render cap
-    // dropped edges (#24). Clauses describe only ink actually on screen
-    // this frame, so the legend can never claim an encoding nothing uses.
-    if (callDepth > 0 && (callSelDrawn || callConnDrawn)) {
-      cap += callDepth === 1
-        ? " · → calls: name-resolved static calls, direct only"
-        : ` · → calls, ${callDepth} hops: name-resolved static calls, direct only`;
-      if (callSelDrawn) {
-        cap += " · callees amber · callers violet";
-        if (callDepth > 1) cap += " · fainter = farther";
-      }
-      if (callAmbigDrawn) cap += " · dashed = one of N same-name candidates";
-      if (callSelDrawn) {
-        const g = ensureCallGraph();
-        const missing = g.over + g.dropped;
-        if (missing) cap += ` · ${missing} more call edges not drawn`;
-      }
-    }
-    drawCaption(cap, W, H);
-  } else if (mode === "anchor") {
-    const a = selected >= 0 ? S[selected].qname : "anchor";
-    ctx.fillText(`x · structure sim → ${a} (A) · ${fmtVal(axisX, ext.x[0])} … ${fmtVal(axisX, ext.x[1])}`, PAD, H - 10);
-    ctx.fillText(`y · vocabulary sim → ${a} (B) · ${fmtVal(axisY, ext.y[0])} … ${fmtVal(axisY, ext.y[1])}`, PAD, 16);
+  if (mode === "anchor") {
+    const a = selected >= 0 ? S[selected].qname : "the anchor";
+    drawAxisLabels(W, H, `structure similarity to ${a}`, `vocabulary similarity to ${a}`, true, true);
   } else if (mode === "time") {
-    ctx.fillText(`x · last touched · ${fmtVal(axisX, ext.x[0])} … ${fmtVal(axisX, ext.x[1])}`, PAD, H - 10);
-    ctx.fillText("y · map y", PAD, 16);
-  } else {
-    ctx.fillText(`x · ${axisLabel(axisX)} · ${fmtVal(axisX, ext.x[0])} … ${fmtVal(axisX, ext.x[1])}`, PAD, H - 10);
-    ctx.fillText(`y · ${axisLabel(axisY)} · ${fmtVal(axisY, ext.y[0])} … ${fmtVal(axisY, ext.y[1])}`, PAD, 16);
+    // the date gridlines above already label x; "map position" is unitless
+    drawAxisLabels(W, H, "last touched", "map position", false, false);
+  } else if (mode === "axes") {
+    drawAxisLabels(W, H, axisLabel(axisX), axisLabel(axisY), true, true);
   }
 }
 
-// The map caption, clip-proof (TKI-72): the honesty clauses ride at the
-// END of the line, so an overflow silently swallows exactly the text that
-// exists to keep the display honest (#28, #24). A caption wider than the
-// stage wraps once at a "·" boundary — two lines, same ink, clauses never
-// dropped, font never shrunk. A caption that fits renders exactly as the
-// single line always did.
-function drawCaption(cap, W, H) {
-  const max = W - 2 * PAD;
-  if (ctx.measureText(cap).width <= max) {
-    ctx.fillText(cap, PAD, H - 10);
-    return;
+// x: min at the left end, max at the right end, name centered along the
+// bottom. y: max at the top, min at the bottom, name rotated up the left
+// edge. `xVals`/`yVals` off when the values would repeat what the plot
+// already labels (time gridlines) or when the axis has no unit (map y).
+function drawAxisLabels(W, H, xName, yName, xVals, yVals) {
+  if (xVals && isFinite(ext.x[0])) {
+    ctx.fillText(fmtVal(axisX, ext.x[0]), PAD, H - 10);
+    const hiTxt = fmtVal(axisX, ext.x[1]);
+    ctx.fillText(hiTxt, W - PAD - ctx.measureText(hiTxt).width, H - 10);
   }
-  const parts = cap.split(" · ");
-  let first = parts.shift();
-  while (parts.length && ctx.measureText(`${first} · ${parts[0]}`).width <= max) {
-    first += ` · ${parts.shift()}`;
+  ctx.fillText(xName, (W - ctx.measureText(xName).width) / 2, H - 10);
+  if (yVals && isFinite(ext.y[0])) {
+    ctx.fillText(fmtVal(axisY, ext.y[1]), PAD, 16);
+    ctx.fillText(fmtVal(axisY, ext.y[0]), PAD, H - 24);
   }
-  ctx.fillText(first, PAD, H - 22);
-  ctx.fillText(parts.join(" · "), PAD, H - 10);
+  ctx.save();
+  ctx.translate(14, (H + ctx.measureText(yName).width) / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText(yName, 0, 0);
+  ctx.restore();
 }
 
 // The selection's layout edges — the mutual-kNN springs that put it where
@@ -990,8 +1000,8 @@ function drawEdges(i, alpha, ink) {
    panel's callers/callees lists show, so map and panel can never disagree
    on one screen. Drawn ONLY for the selection (both directions) here and
    between pinned boards (drawBoards); the encoding is stated in the map
-   caption and the toggle's title, and hover names each edge without a
-   fetch (#1, #17, #28). */
+   "about this view" popover and the toggle's title, and hover names each
+   edge without a fetch (#1, #17, #28). */
 // The join key a callee is reached BY — the class segment for a
 // constructor edge (`Widget.__init__` is reached by a call to `Widget`),
 // the base name otherwise. Mirrors call_edges' by_name/class_init keying,
@@ -1012,19 +1022,16 @@ function callFanout(caller, j) {
   for (const t of S[caller].calls) if (callKey(S[t].qname) === key) n++;
   return n;
 }
-let callAmbigDrawn = false; // any dashed call edge this frame → caption clause
-let callSelDrawn = false;   // selection-graph arrows on screen this frame
-let callConnDrawn = false;  // pinned-board call connectors on screen this frame
-
 /* ── depth BFS (TKI-79): the chain of calls around the selection ──
    Callee direction (what the selection ultimately calls) and caller
    direction (what ultimately calls it), each walked to the chosen depth
    over the same edge set the panel's callers/callees lists show —
    client-side over S[].calls and its boot-time inversion, zero fetches
    (#1). Hue = direction, opacity fades by hop (#25); both stated in the
-   caption (#28). Deterministic: S order, hop order, first edge wins. */
+   "about this view" popover (#28). Deterministic: S order, hop order,
+   first edge wins. */
 const CALL_ALPHA = [0.9, 0.5, 0.3];  // ink at hop 1 / 2 / 3
-const CALL_EDGE_CAP = 400;           // render cap; the caption counts the rest
+const CALL_EDGE_CAP = 400;           // render cap; the footer counts the rest
 let callGraph = null;                // cached {key, edges, nodes, over, dropped}
 function callAlpha(hop) { return CALL_ALPHA[Math.min(hop, CALL_ALPHA.length) - 1]; }
 function ensureCallGraph() {
@@ -1053,7 +1060,7 @@ function ensureCallGraph() {
       const next = [];
       for (const u of frontier) {
         // the server caps each row's callee list (calls_over): those edges
-        // exist but can't be drawn — counted into the caption's clause (#24)
+        // exist but can't be drawn — counted into the footer's note (#24)
         if (dir === "out") g.over += S[u].calls_over || 0;
         for (const v of dir === "out" ? S[u].calls : callersOf[u]) {
           if (!visible(S[v])) continue;
@@ -1105,11 +1112,8 @@ function drawCallEdges(outInk, inInk) {
     ctx.lineWidth = hot ? 1.5 : 1;
     const [x0, y0] = screenXY(e.a);
     const [x1, y1] = screenXY(e.b);
-    const ambig = callFanout(e.a, e.b) >= 2;
-    if (ambig) callAmbigDrawn = true;
-    callArrow(x0, y0, x1, y1, radii[e.b], ambig);
+    callArrow(x0, y0, x1, y1, radii[e.b], callFanout(e.a, e.b) >= 2);
   }
-  if (g.edges.length) callSelDrawn = true;
   ctx.globalAlpha = 1;
   ctx.lineWidth = 1;
 }
@@ -1239,6 +1243,7 @@ async function applyMode(m) {
   layout();
   fitView();
   footer();
+  aboutRefresh(); // the open popover describes the view it sits on
   scheduleDraw();
 }
 function syncViews() {
@@ -1302,6 +1307,7 @@ async function drillTo(path) {
   layout();
   fitView();
   footer();
+  aboutRefresh(); // the map paragraph names the scope's color keying
   scheduleDraw();
 }
 // where am I / how do I get back: repo › dir › … › file, every ancestor
@@ -1329,13 +1335,16 @@ function breadcrumb() {
   $("count").textContent = `${drill ? drill.ids.length : BOOT.count} symbols`;
 }
 
-/* ── footer readout ── */
+/* ── footer readout (TKI-81): a quiet strip — the hovered symbol's data
+   row, or a note the current state earned, or nothing at all. The old
+   standing hint bar is gone: pan, zoom and click are learned by doing,
+   and a bar restating them was noise on every frame. ── */
 function footer() {
   const el = $("readout");
   if (picking >= 0) {
     el.textContent = hovered >= 0
-      ? `pick B side: ${S[hovered].qname}`
-      : `pick comparison — click a map point or search hit for the B side (A: ${S[picking].qname}) · esc cancels`;
+      ? `click to compare ${S[picking].qname} with ${S[hovered].qname}`
+      : `click any dot or search result to compare it with ${S[picking].qname} — esc cancels`;
     return;
   }
   if (hovered >= 0) {
@@ -1350,7 +1359,7 @@ function footer() {
       parts.push(`${axisLabel(axisX)} ${fmtVal(axisX, vx[hovered])}`,
                  `${axisLabel(axisY)} ${fmtVal(axisY, vy[hovered])}`);
     }
-    if (s.branch_new) parts.push("branch-new");
+    if (s.branch_new) parts.push("new on this branch");
     el.textContent = parts.join(" · ");
     return;
   }
@@ -1359,28 +1368,28 @@ function footer() {
     return;
   }
   const notes = [];
-  if ((isAnchorAxis(axisX) || isAnchorAxis(axisY)) && selected >= 0) {
-    notes.push(`anchor: ${S[selected].qname}`);
-  }
   const dateNote = (axis, which, count) => {
     if (!isDateAxis(axis) || count === 0) return;
     notes.push(isFinite(ext[which][0])
-      ? `${count} symbols without git dates sit at ${which}=min`
-      : `no git dates at this root — ${which} flat`);
+      ? `${count} symbols have no git dates — they sit at the ${which === "x" ? "left" : "bottom"} edge`
+      : `no git dates at this root, so the ${which} axis is flat`);
   };
   dateNote(axisX, "x", parked.x);
   dateNote(axisY, "y", parked.y);
   // calls set by hand, nothing to draw yet: say what would make edges
-  // appear (#14, #22 — the act deserves a response). The untouched default
-  // stays silent: at boot the standing hint teaches select-first anyway,
-  // and this note would displace it.
+  // appear (#14, #22 — the act deserves a response)
   if (callsTouched && callDepth > 0 && mode === "map" && selected < 0 && !boards.some(b => !b.min)) {
-    notes.push("calls: select or pin a symbol to see its call edges");
+    notes.push("select a symbol to see its calls");
   }
-  if (mode === "axes") {
-    notes.push("PCA components are directions of greatest variance, ranked");
+  // the honest cap count (#24, moved from the map caption in TKI-81): when
+  // the selection's call graph has edges beyond the render cap or the
+  // server's per-row cap, the display must never read as complete
+  if (mode === "map" && callDepth > 0 && selected >= 0 && visible(S[selected])) {
+    const g = ensureCallGraph();
+    const missing = g.over + g.dropped;
+    if (missing) notes.push(`${missing} more call edges exist than the map draws`);
   }
-  el.textContent = notes.length ? notes.join(" · ") : DEFAULT_HINT;
+  el.textContent = notes.join("; ");
 }
 
 /* ── hit test ── */
@@ -1433,7 +1442,7 @@ function edgeTermText(e) {
   const key = e.a < e.b ? `${e.a}:${e.b}` : `${e.b}:${e.a}`;
   const t = edgeTerms.get(key);
   if (t === undefined || t === null) return "…";
-  return t.length ? t.join(" · ") : "no shared vocabulary";
+  return t.length ? t.join(", ") : "no shared vocabulary";
 }
 
 // One hover pass per animation frame: point first (existing hit rule), then
@@ -1476,15 +1485,16 @@ function hoverUpdate() {
   }
 }
 
-// A call edge's honest one-liner: the encoding, plus "one of N" when the
-// resolver kept N same-name candidates instead of picking (edge.a is the
-// caller for every call-flavored edge/connector), plus the hop distance
-// when the edge sits deeper than one hop in the BFS graph (TKI-79).
+// A call edge's honest one-liner, in a person's words: what kind of call
+// it is, "one of N" when the resolver kept N same-name candidates instead
+// of picking (edge.a is the caller for every call-flavored edge or
+// connector), and the hop distance when the edge sits deeper than one hop
+// in the BFS graph (TKI-79).
 function callEdgeHint(edge) {
   const fan = callFanout(edge.a, edge.b);
-  return "name-resolved static call · direct only"
-    + (fan >= 2 ? ` · one of ${fan} same-name candidates` : "")
-    + (edge.hop >= 2 ? ` · ${edge.hop} hops ${edge.dir === "out" ? "downstream" : "upstream"} of the selection` : "");
+  return "a static call, resolved by name"
+    + (fan >= 2 ? ` — one of ${fan} same-name candidates` : "")
+    + (edge.hop >= 2 ? `; ${edge.hop} hops ${edge.dir === "out" ? "downstream" : "upstream"} of the selection` : "");
 }
 function tipLine(cls, text) {
   const d = document.createElement("div");
@@ -1506,11 +1516,11 @@ function tooltip() {
       // calls connector (TKI-72): direction + encoding, no number, no fetch
       tip.appendChild(tipLine("t-name", `${S[connHover.a].qname} → ${S[connHover.b].qname}`));
       tip.appendChild(tipLine("t-hint", callEdgeHint(connHover)));
-      tip.appendChild(tipLine("t-hint", "click to compare side-by-side"));
+      tip.appendChild(tipLine("t-hint", "click to compare them side by side"));
     } else {
       tip.appendChild(tipLine("t-name", `${S[connHover.a].qname} — ${S[connHover.b].qname}`));
-      tip.appendChild(tipLine("t-terms", `shared: ${edgeTermText(connHover)}`));
-      tip.appendChild(tipLine("t-hint", "click to compare side-by-side"));
+      tip.appendChild(tipLine("t-terms", `shared vocabulary: ${edgeTermText(connHover)}`));
+      tip.appendChild(tipLine("t-hint", "click to compare them side by side"));
     }
   } else if (edgeHover) {
     if (edgeHover.call) {
@@ -1518,17 +1528,20 @@ function tooltip() {
       tip.appendChild(tipLine("t-hint", callEdgeHint(edgeHover)));
     } else {
       tip.appendChild(tipLine("t-name", `${S[edgeHover.a].qname} — ${S[edgeHover.b].qname}`));
-      tip.appendChild(tipLine("t-terms", `shared: ${edgeTermText(edgeHover)}`));
+      tip.appendChild(tipLine("t-terms", `shared vocabulary: ${edgeTermText(edgeHover)}`));
       // the same pair can also be a call edge (TKI-72): the layout edge
       // wins the hover, but the call fact — and its same-name ambiguity —
-      // must not vanish under it (#28); arrow = direction vs the names above
+      // must not vanish under it (#28); said as a sentence, with the
+      // caller named so the direction survives the dash above
       if (callDepth > 0) {
+        const base = id => S[id].qname.split(".").pop();
         if (S[edgeHover.a].calls.includes(edgeHover.b)) {
-          tip.appendChild(tipLine("t-hint", "→ " + callEdgeHint(edgeHover)));
+          tip.appendChild(tipLine("t-hint",
+            `${base(edgeHover.a)} also calls ${base(edgeHover.b)} — ${callEdgeHint(edgeHover)}`));
         }
         if (S[edgeHover.b].calls.includes(edgeHover.a)) {
           tip.appendChild(tipLine("t-hint",
-            "← " + callEdgeHint({a: edgeHover.b, b: edgeHover.a})));
+            `${base(edgeHover.b)} also calls ${base(edgeHover.a)} — ${callEdgeHint({a: edgeHover.b, b: edgeHover.a})}`));
         }
       }
     }
@@ -1652,9 +1665,9 @@ function fillPeek(id) {
   if (cut < src.text.length) {
     let shown = 0;
     for (let i = 0; i < cut; i++) if (src.text.charCodeAt(i) === 10) shown++;
-    more.textContent = `… ${lineCount(src.text) - shown} more lines · click pins the card`;
+    more.textContent = `… ${lineCount(src.text) - shown} more lines — click to pin`;
   } else {
-    more.textContent = "click pins the card";
+    more.textContent = "click to pin";
   }
   body.appendChild(more);
   positionPeek();
@@ -1677,7 +1690,7 @@ function updatePeekTerms() {
   if (!t) return;
   if (edgeHover && !edgeHover.call && (edgeHover.a === peekId || edgeHover.b === peekId)) {
     const other = edgeHover.a === peekId ? edgeHover.b : edgeHover.a;
-    t.textContent = `shared with ${S[other].qname} — ${edgeTermText(edgeHover)}`;
+    t.textContent = `shared vocabulary with ${S[other].qname}: ${edgeTermText(edgeHover)}`;
     t.hidden = false;
   } else {
     t.hidden = true;
@@ -2027,7 +2040,7 @@ function drawConnSeg(ra, rb, lo, hi, accent, ambient) {
 // caller-edge → callee-edge in --call with an arrowhead — visibly not the
 // accent vocabulary connector. Its "calls" naming moved into the hover
 // tip with the vocabulary labels (TKI-79, same #17/#23 call): the hue and
-// arrowhead stay as the at-rest encoding, the caption legend spells them
+// arrowhead stay as the at-rest encoding, "about this view" spells them
 // out. When the pair also carries a similarity connector, this one steps
 // 8px aside so the lines don't occlude each other (a mutual-recursion
 // pair's two arrows land on opposite sides for the same reason). The seg
@@ -2049,10 +2062,7 @@ function drawCallConnSeg(ra, rb, a, b) {
   ctx.fillStyle = ink;
   ctx.globalAlpha = hot ? 0.95 : 0.6;
   ctx.lineWidth = hot ? 1.5 : 1;
-  const ambig = callFanout(a, b) >= 2;
-  if (ambig) callAmbigDrawn = true;
-  callConnDrawn = true;
-  callArrow(x0, y0, x1, y1, 0, ambig);
+  callArrow(x0, y0, x1, y1, 0, callFanout(a, b) >= 2);
   ctx.globalAlpha = 1;
   ctx.lineWidth = 1;
   connSegs.push({a, b, call: true, x0, y0, x1, y1});
@@ -2200,8 +2210,8 @@ function fillLodCard(c, id) {
   body.appendChild(pre);
   // the truncation count is a fact about the code; the old per-card "click
   // the dot to pin" hint was N copies of one sentence (TKI-78) — the
-  // affordance already announces itself through the pointer cursor (#18),
-  // the peek card's own hint, and the footer's standing hint (#14)
+  // affordance already announces itself through the pointer cursor (#18)
+  // and the peek card's own hint (#14)
   if (cut < src.text.length) {
     const more = document.createElement("div");
     more.className = "pk-more";
@@ -2391,19 +2401,23 @@ function refLine(ref, extra, cmpA) {
   loc.textContent = `${midPath(ref.file, 16)}:${ref.line}`;
   li.appendChild(loc);
   if (Array.isArray(extra)) {
-    // two-cosine rows (nearest existing: A structure, B vocabulary)
+    // two-cosine rows (nearest existing: structure, then vocabulary) —
+    // each number says what it is on hover (#24)
     li.className = "cos-row2";
-    for (const v of extra) {
+    extra.forEach((v, i) => {
       const c = document.createElement("span");
       c.className = "cos";
       c.textContent = v.toFixed(2);
+      c.title = i === 0 ? "structure similarity (channel A cosine)"
+                        : "vocabulary similarity (channel B cosine)";
       li.appendChild(c);
-    }
+    });
   } else if (extra !== undefined) {
     li.className = "cos-row";
     const c = document.createElement("span");
     c.className = "cos";
     c.textContent = extra.toFixed(2);
+    c.title = "structure similarity (channel A cosine)";
     li.appendChild(c);
   }
   // per-row compare (TKI-66): side-by-side against THIS row, not the
@@ -2444,10 +2458,14 @@ function bindRowLink(li, id) {
     if (linkHover === id) { linkHover = -1; scheduleDraw(); }
   });
 }
-function listSection(title, titleDim, build) {
+// `hoverNote` (TKI-81): how-it's-computed detail that a reader may want
+// once but not on every glance — it rides the heading's hover, keeping
+// the visible subtitle a plain sentence.
+function listSection(title, titleDim, build, hoverNote) {
   const sec = document.createElement("section");
   const h = document.createElement("h3");
   h.textContent = title + " ";
+  if (hoverNote) h.title = hoverNote;
   if (titleDim) {
     const d = document.createElement("span");
     d.className = "dim";
@@ -2560,10 +2578,11 @@ async function loadCard(id) {
   card.appendChild(meta);
 
   // corpus-grounded prevalence (TKI-74/77): the CLI card's own words,
-  // rendered from `explain::fact_lines` server-side — no reformatting here
+  // rendered from `explain::fact_lines` server-side — no reformatting
+  // here, and the same "; " join the CLI card prints (#41)
   const facts = document.createElement("div");
   facts.className = "facts";
-  facts.textContent = c.facts.lines.join(" · ");
+  facts.textContent = c.facts.lines.join("; ");
   card.appendChild(facts);
 
   // actions: retrace jumps, open the side-by-side (TKI-61)
@@ -2580,7 +2599,7 @@ async function loadCard(id) {
   const cmpBtn = document.createElement("button");
   cmpBtn.className = "chipbtn";
   cmpBtn.textContent = "compare";
-  cmpBtn.title = "side-by-side with the nearest embedding-ranked symbol";
+  cmpBtn.title = "side by side with its nearest neighbor on the map";
   cmpBtn.addEventListener("click", () => {
     // default B = the same nearest layout neighbor the dropdown will mark
     // "nearest" — one source of truth, so the auto-pick can't drift from
@@ -2599,7 +2618,7 @@ async function loadCard(id) {
   // the numbers are Channel A/B's)
   if (c.nearest_existing) {
     card.appendChild(listSection("nearest existing",
-        "ranked by embedding · A structure · B vocabulary", sec => {
+        "the closest code that already exists", sec => {
       if (!c.nearest_existing.length) {
         const none = document.createElement("div");
         none.className = "none";
@@ -2610,15 +2629,15 @@ async function loadCard(id) {
       const ul = document.createElement("ul");
       c.nearest_existing.forEach(x => ul.appendChild(refLine(x, [x.a_cos, x.b_cos], id)));
       sec.appendChild(ul);
-    }));
+    }, "ranked by the embedding; the two numbers are structure and vocabulary similarity"));
   }
 
   if (c.clones.exact.length || c.clones.near.length) {
-    card.appendChild(listSection("clones", "same tight shape cluster", sec => {
+    card.appendChild(listSection("clones", "code built the same way", sec => {
       if (c.clones.exact.length) {
         const sub = document.createElement("div");
         sub.className = "shared";
-        sub.textContent = "exact (identical structure)";
+        sub.textContent = "identical structure";
         sec.appendChild(sub);
         const ul = document.createElement("ul");
         c.clones.exact.forEach(x => ul.appendChild(refLine(x, undefined, id)));
@@ -2627,7 +2646,7 @@ async function loadCard(id) {
       if (c.clones.near.length) {
         const sub = document.createElement("div");
         sub.className = "shared";
-        sub.textContent = "near (cos A)";
+        sub.textContent = "nearly identical";
         sec.appendChild(sub);
         const ul = document.createElement("ul");
         c.clones.near.forEach(x => ul.appendChild(refLine(x, x.cos, id)));
@@ -2636,9 +2655,8 @@ async function loadCard(id) {
     }));
   }
 
-  card.appendChild(listSection("role twins", c.twins
-      ? `vocab ≥${c.twins.theta_b.toFixed(2)}, different shape · B=${c.twins.b_max.toFixed(2)}`
-      : "vocab ≥0.55, different shape", sec => {
+  card.appendChild(listSection("role twins",
+      "same vocabulary, different shape", sec => {
     if (!c.twins) {
       const none = document.createElement("div");
       none.className = "none";
@@ -2651,12 +2669,14 @@ async function loadCard(id) {
     sec.appendChild(ul);
     const sh = document.createElement("div");
     sh.className = "shared";
-    sh.textContent = "shared: " + c.twins.shared_terms.join(", ");
+    sh.textContent = "shared vocabulary: " + c.twins.shared_terms.join(", ");
     sec.appendChild(sh);
-  }));
+  }, c.twins
+      ? `identifier vocabulary matches at cosine ≥${c.twins.theta_b.toFixed(2)}; the strongest match here is ${c.twins.b_max.toFixed(2)}`
+      : "identifier vocabulary at cosine ≥0.55, with a different structure"));
 
   card.appendChild(listSection(`callers ${c.callers.length} · callees ${c.callees.length}`,
-      "import-aware", sec => {
+      null, sec => {
     if (!c.callers.length && !c.callees.length) return;
     if (c.callers.length) {
       const sub = document.createElement("div");
@@ -2676,12 +2696,12 @@ async function loadCard(id) {
       c.callees.forEach(x => ul.appendChild(refLine(x, undefined, id)));
       sec.appendChild(ul);
     }
-  }));
+  }, "static calls resolved through imports — dynamic dispatch isn't traced"));
 
   if (c.family) {
     card.appendChild(listSection("family", "experimental", sec => {
       const d = document.createElement("div");
-      d.textContent = `F${c.family.index} member (${c.family.role}, cos ${c.family.cos.toFixed(2)})`;
+      d.textContent = `in family F${c.family.index} as ${c.family.role} (cosine ${c.family.cos.toFixed(2)})`;
       sec.appendChild(d);
     }));
   }
@@ -2693,8 +2713,10 @@ async function loadCard(id) {
   // list is a map of the neighborhood, not a to-do queue.
   const nearest = layoutNeighbors(id, 5);
   if (nearest.length) {
-    card.appendChild(listSection("nearest layout neighbors",
-        "closest first · ✓ visited this session", sec => {
+    // the ✓ key appears only once there is a ✓ to explain (TKI-81)
+    const anyVisited = nearest.some(j => visited.has(j));
+    card.appendChild(listSection("nearest on the map",
+        anyVisited ? "✓ marks ones you've already visited" : null, sec => {
       const ul = document.createElement("ul");
       nearest.forEach(j => {
         const s = S[j];
@@ -2703,7 +2725,7 @@ async function loadCard(id) {
         ul.appendChild(li);
       });
       sec.appendChild(ul);
-    }));
+    }, "the selection's layout neighbors, closest on the map first"));
   }
 }
 
@@ -2733,7 +2755,7 @@ function buildLegend() {
     return sp;
   };
   legend.append(
-    swatch(1), document.createTextNode(" identical after whitespace collapse · "),
+    swatch(1), document.createTextNode(" identical after whitespace collapse\u{2003}"),
     swatch(2), document.createTextNode(" aligned, differs"),
   );
 }
@@ -2745,7 +2767,7 @@ function buildPane(side, regions, key) {
   head.className = "panehead";
   const b = document.createElement("b");
   b.textContent = side.qname;
-  head.append(b, document.createTextNode(` · ${side.file}:${side.line}`));
+  head.append(b, document.createTextNode(` — ${side.file}:${side.line}`));
   pane.appendChild(head);
   const pre = document.createElement("pre");
   // regions arrive sorted by the A side; the construction is monotonic on
@@ -3028,7 +3050,7 @@ function buildChips() {
     glyph.textContent = "⎇";
     chip.appendChild(glyph);
     chip.appendChild(document.createTextNode(
-      `${META.branch.name} · ${META.branch.changed} changed vs ${META.branch.base}`));
+      `${META.branch.name}: ${META.branch.changed} changed vs ${META.branch.base}`));
     chip.addEventListener("click", () => {
       branchFocus = !branchFocus;
       chip.classList.toggle("on", branchFocus);
@@ -3085,18 +3107,18 @@ function renderGuide() {
   linkHover = -1; // the old card's rows are gone; no orphaned highlight (#39)
   const scope = S.filter(s => visible(s));
   const h2 = document.createElement("h2");
-  h2.textContent = "start";
+  h2.textContent = "where to start";
   card.appendChild(h2);
   const loc = document.createElement("div");
   loc.className = "loc";
-  loc.textContent = `${drill ? drill.path : BOOT.repo} · ${scope.length} symbols shown`;
+  loc.textContent = `${drill ? drill.path : BOOT.repo} — ${scope.length} symbols shown`;
   card.appendChild(loc);
 
   // Plain descriptive count, not a clickable row — there is no obviously
   // useful action to bind (see TKI-56: never flag the minority as wrong).
   const docs = docFact();
   if (docs) {
-    card.appendChild(listSection("module docstring", null, sec => {
+    card.appendChild(listSection("module docstrings", null, sec => {
       const p = document.createElement("div");
       p.className = "loc";
       p.textContent = `${docs.withDoc} of ${docs.total} files`;
@@ -3104,13 +3126,13 @@ function renderGuide() {
     }));
   }
 
-  const section = (title, dim, rows) => {
+  const section = (title, dim, rows, hoverNote) => {
     if (!rows.length) return; // no fact, no section
     card.appendChild(listSection(title, dim, sec => {
       const ul = document.createElement("ul");
       rows.forEach(r => ul.appendChild(r));
       sec.appendChild(ul);
-    }));
+    }, hoverNote));
   };
   const row = (nameEl, value, title, onClick) => {
     const li = document.createElement("li");
@@ -3148,7 +3170,7 @@ function renderGuide() {
       .slice(0, 5)
       .map(([dir, cnt]) => row(nameEl(dir), String(cnt),
         `click to open ${drillTarget(dir)}`, () => drillTo(drillTarget(dir))));
-    section("largest dirs", "symbols · click to drill", dirs);
+    section("largest dirs", "by symbol count — click one to open it", dirs);
 
     const fcounts = new Map();
     for (const s of scope) fcounts.set(s.file, (fcounts.get(s.file) || 0) + 1);
@@ -3158,7 +3180,7 @@ function renderGuide() {
         .slice(0, 3)
         .map(([file, cnt]) => row(nameEl(midPath(file, 30)), String(cnt),
           `click to open ${file}`, () => drillTo(file)));
-      section("largest files", "symbols · click to drill", files);
+      section("largest files", "by symbol count — click one to open it", files);
     }
   }
 
@@ -3166,13 +3188,62 @@ function renderGuide() {
     .sort((a, b) => b.indeg - a.indeg || a.id - b.id)
     .slice(0, 5)
     .map(s => symRow(s, `${s.indeg}×`));
-  section("most callers", "import-aware in-degree", called);
+  section("most callers", "how many places call them", called,
+    "static calls resolved through imports — dynamic dispatch isn't traced");
 
   const dated = scope.filter(s => s.last_touched !== null)
     .sort((a, b) => b.last_touched - a.last_touched || a.id - b.id)
     .slice(0, 3)
     .map(s => symRow(s, new Date(s.last_touched * 1000).toISOString().slice(0, 10)));
-  section("last touched", "newest first", dated);
+  section("last touched", null, dated);
+}
+
+/* ── about this view (TKI-81): the one place each view explains itself ──
+   Two or three full sentences per view — the layout, the encodings, and
+   their limits — behind a single quiet control at the map's corner. This
+   is where the old caption nuggets went: every encoding that was stamped
+   on the canvas is still learnable here (#28 moved, not deleted), in
+   words that teach instead of abbreviate. */
+function aboutParas() {
+  if (mode === "map") {
+    return [
+      `Every dot is a function or class; bigger dots have more parse-tree nodes, and colors follow ${drill ? "the current scope's own groups — see the legend chips" : "the top-level directories"}.`,
+      `The layout places each symbol near its ${BOOT.k} nearest neighbors by cosine similarity over code embeddings, so code that reads alike sits close together. The lines fanning out of a selected dot are those neighbors — the links that put it where it is.`,
+      "Call arrows are structure, not similarity: amber points at what the selection calls, violet comes from what calls it. Hops past the first draw fainter, and a dashed arrow means the name matched several candidates. Only static, name-resolved calls are traced — dynamic dispatch is invisible.",
+    ];
+  }
+  if (mode === "anchor") {
+    return [
+      `Both axes measure similarity to ${selected >= 0 ? S[selected].qname : "the anchored symbol"}: structure — how the code is shaped — runs left to right, and vocabulary — the identifiers it uses — runs bottom to top.`,
+      "The values are deterministic cosines from the structure (A) and vocabulary (B) channels, the same numbers the panel card shows. Top-right means similar in both senses; top-left means same words in a different shape.",
+    ];
+  }
+  if (mode === "time") {
+    return [
+      "Symbols spread left to right by when git last touched them; height keeps their position from the map, so neighborhoods stay recognizable.",
+      "Symbols with no git history sit parked at the left edge — the footer counts them.",
+    ];
+  }
+  return [
+    "Any two measures, one per axis. The PCA options are principal components of the embedding — its directions of greatest variance, ranked, each labeled with the share of variance it explains.",
+    "Date axes park symbols without git history at the low edge; the footer counts them.",
+  ];
+}
+function aboutRefresh() {
+  const pop = $("aboutPop");
+  if (pop.hidden) return;
+  pop.textContent = "";
+  for (const text of aboutParas()) {
+    const p = document.createElement("p");
+    p.textContent = text;
+    pop.appendChild(p);
+  }
+}
+function aboutToggle(open) {
+  const pop = $("aboutPop");
+  pop.hidden = open === undefined ? !pop.hidden : !open;
+  $("about").classList.toggle("open", !pop.hidden);
+  aboutRefresh();
 }
 
 function initControls() {
@@ -3256,7 +3327,9 @@ function initControls() {
   });
   document.addEventListener("mousedown", e => {
     if (!$("searchwrap").contains(e.target)) $("hitlist").hidden = true;
+    if (!$("about").contains(e.target) && !$("aboutPop").hidden) aboutToggle(false);
   });
+  $("aboutBtn").addEventListener("click", () => aboutToggle());
 
   // pan / zoom / hover / click
   let dragging = false, moved = 0, lastX = 0, lastY = 0;
@@ -3334,6 +3407,7 @@ function initControls() {
   // instead of doubling as a silent back button.
   document.addEventListener("keydown", e => {
     if (e.key !== "Escape" || e.target === $("search")) return;
+    if (!$("aboutPop").hidden) { aboutToggle(false); return; }
     if (!$("hitlist").hidden) { $("hitlist").hidden = true; return; }
     if (picking >= 0) { cancelPick(); return; }
     if (cmp) { closeCompare(); return; }
@@ -3405,7 +3479,7 @@ function pcaAxisLabels() {
     const v = META.pca_var[c];
     if (v === undefined) continue;
     const p = v * 100;
-    const label = `PCA-${c + 1} · ${p >= 9.5 ? Math.round(p) : p.toFixed(1)}% var`;
+    const label = `PCA-${c + 1} (${p >= 9.5 ? Math.round(p) : p.toFixed(1)}% of variance)`;
     AXES.find(a => a.id === "pca" + c).label = label;
     for (const selId of ["ax", "ay"]) {
       for (const o of $(selId).options) {

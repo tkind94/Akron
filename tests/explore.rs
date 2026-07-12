@@ -721,15 +721,15 @@ fn explain_serves_facts_matching_the_cli_card_for_a_symbol_with_clones_and_famil
     assert_eq!(
         lines,
         [
-            "shape 3 members across 3 files",
-            "name \"parse_records\" corpus-unique",
-            "family F1 4 members across 4 files",
+            "one of 3 symbols with this shape, across 3 files",
+            "the only symbol named \"parse_records\"",
+            "one of 4 members in family F1, across 4 files",
         ],
         "facts.lines must match the CLI card's clauses verbatim: {lines:?}"
     );
     assert_eq!(
-        lines.join(" \u{b7} "),
-        "shape 3 members across 3 files \u{b7} name \"parse_records\" corpus-unique \u{b7} family F1 4 members across 4 files",
+        lines.join("; "),
+        "one of 3 symbols with this shape, across 3 files; the only symbol named \"parse_records\"; one of 4 members in family F1, across 4 files",
         "joined with the CLI's separator, this is the exact `facts` line printed by `akron explain`"
     );
 }
@@ -755,7 +755,7 @@ fn explain_serves_facts_with_no_family_fragment_for_a_corpus_unique_symbol() {
     let lines: Vec<&str> = facts["lines"].as_array().unwrap().iter().map(|s| s.as_str().unwrap()).collect();
     assert_eq!(
         lines,
-        ["shape corpus-unique", "name \"mix_channels\" corpus-unique"],
+        ["nothing else in the corpus shares this shape or name"],
         "no family clause when the symbol has no family membership: {lines:?}"
     );
     assert!(v["family"].is_null(), "family field itself is also absent");
