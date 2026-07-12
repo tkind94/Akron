@@ -201,7 +201,9 @@ main.hasSel { grid-template-columns: 1fr minmax(420px, 46%); }
   margin: 0;
   border: none;
   border-radius: 0;
-  max-height: 150px;
+  /* fits the full 12-line cut at 11px/1.5 — the "N more lines" count must
+     describe what is actually shown, never a clipped body */
+  max-height: 210px;
   overflow: hidden;
   font-size: 11px;
   padding: 6px 8px;
