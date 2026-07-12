@@ -190,13 +190,21 @@ box is J10 over the live index with hits highlighted. Derived per run, held
 in memory, nothing written into the repo; layout and PCA deterministic.
 Tests hidden by default — on measured repos they smear every projection.
 
-**Drill-down (TKI-54):** dblclick a dir label/legend chip (or a point for
-its file, or a path segment on the card) to re-run the layout over just
+**Drill-down (TKI-54):** click a dir label on the map, the ▸ on a legend
+chip, or a path segment on the card (that is a point's route to its file)
+to re-run the layout over just
 that subset — its internal structure gets the whole plane, colors re-key
 to subdirectories (classes inside a file). The topbar breadcrumb always
 answers "where am I"; every ancestor is clickable, Escape climbs one
 level, selecting anything outside the drill exits to the whole-repo map.
 Deterministic like the launch layout (seeded from the global coordinates).
+**Living boards (TKI-68):** rest on a point and a peek card blooms with
+its first lines; click pins it as a board card that rides pan/zoom,
+anchored to its dot (soft cap 6 — the oldest minimizes to a chip). Pinned
+neighbors connect card-to-card with lines labeled by their shared
+vocabulary — terms, never a number; click a line for the side-by-side, or
+drag one card's header onto another to wire an arbitrary pair. Escape
+dismisses the newest card; the side panel stays the deep dossier.
 **Guidance:** with nothing selected the panel lists factual starting
 points for the current scope — largest dirs/files, most-called symbols,
 last touched — each row a click; a selected card ends with the nearest
