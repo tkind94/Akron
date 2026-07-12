@@ -1,6 +1,6 @@
 # AKRON-DESIGN
 
-42 testable interaction-design rules for Akron's `explore` UI. Each is a check,
+43 testable interaction-design rules for Akron's `explore` UI. Each is a check,
 not a vibe: an agent touching `explore.html` (or the served UI in `explore.rs`)
 must be able to verify or falsify it against the diff. Tag = primary source.
 
@@ -142,6 +142,23 @@ out and ranks, it never produces a displayed score.
     apologize.** "no symbols match — widen the query" beats "Sorry, no
     results." Errors state what happened and how to fix it, traceably.
     *(Nielsen heuristics)*
+43. **No tagline nuggets: explanatory or instructional copy is a sentence a
+    person would say, shown at the moment and in the place it applies — or
+    it doesn't exist.** A user-visible string that chains unrelated clauses
+    with " · " separators fails review ("drag pan · wheel zoom · …",
+    "map · 8-nearest-neighbor layout · …"). The separator stays legal in
+    exactly one form: a row of labeled values about a single object (the
+    hovered symbol's footer readout, the card's meta line, "callers 3 ·
+    callees 2"). Everything else meets one of three fates, decided string
+    by string: DELETED (a hint restating a visible affordance is noise),
+    FOLDED into the control it describes (a labeled control needs no
+    external caption), or REWRITTEN as full sentences behind the one
+    discoverable place they belong ("about this view", a control's hover
+    title, an earned footer note). Honesty constraints (#24, #28) move with
+    the words — an encoding's explanation may relocate, never disappear.
+    *(CEO review 2026-07-12: "there are way more appropriate ways to convey
+    and intelligently display this information than sticking these terse
+    little nuggets all over the screen")*
 
 ## Operationalizing
 

@@ -899,39 +899,54 @@ fn fmt_count(symbols: &[SymbolPrint], ids: &[usize]) -> String {
     }
 }
 
-/// The rendered fact clauses (TKI-74/77): shape prevalence, name
-/// prevalence, then family size if present — same words and pluralization
-/// for the CLI card and `explore`'s JSON panel (#41), computed once here
-/// so neither caller reimplements the formatting.
+/// The rendered fact clauses (TKI-74/77, reworded TKI-81): corpus
+/// prevalence said the way a person would say it — same words for the CLI
+/// card and `explore`'s JSON panel (#41), computed once here so neither
+/// caller reimplements the phrasing. Clauses are sentences; callers join
+/// them with "; ". The symbol's own name sits in the card header, so the
+/// both-unique case doesn't repeat it.
 pub fn fact_lines(facts: &CardFacts, family: Option<&CardFamily>) -> Vec<String> {
-    let files_word = |n: u32| if n == 1 { "file" } else { "files" };
-    let mut parts = vec![
-        if facts.shape_members > 1 {
+    let span = |n_files: u32| {
+        if n_files == 1 {
+            "in the same file".to_string()
+        } else {
+            format!("across {n_files} files")
+        }
+    };
+    let shape_unique = facts.shape_members <= 1;
+    let name_unique = facts.name_count <= 1;
+    let mut parts = if shape_unique && name_unique {
+        vec!["nothing else in the corpus shares this shape or name".to_string()]
+    } else if shape_unique {
+        vec![
+            format!("one of {} named {:?}", facts.name_count, facts.name_key),
+            "the only symbol with this shape".to_string(),
+        ]
+    } else if name_unique {
+        vec![
             format!(
-                "shape {} members across {} {}",
+                "one of {} symbols with this shape, {}",
                 facts.shape_members,
-                facts.shape_files,
-                files_word(facts.shape_files)
-            )
-        } else {
-            "shape corpus-unique".to_string()
-        },
-        if facts.name_count > 1 {
+                span(facts.shape_files)
+            ),
+            format!("the only symbol named {:?}", facts.name_key),
+        ]
+    } else {
+        vec![
             format!(
-                "name {:?} shared by {} corpus symbols",
-                facts.name_key, facts.name_count
-            )
-        } else {
-            format!("name {:?} corpus-unique", facts.name_key)
-        },
-    ];
+                "one of {} symbols with this shape, {}",
+                facts.shape_members,
+                span(facts.shape_files)
+            ),
+            format!("one of {} named {:?}", facts.name_count, facts.name_key),
+        ]
+    };
     if let Some(f) = family {
         parts.push(format!(
-            "family F{} {} members across {} {}",
-            f.index + 1,
+            "one of {} members in family F{}, {}",
             f.members,
-            f.n_files,
-            files_word(f.n_files as u32)
+            f.index + 1,
+            span(f.n_files as u32)
         ));
     }
     parts
@@ -968,7 +983,7 @@ fn render_card(analysis: &Analysis, cfg: &Config, target: usize) -> Result<()> {
     // ── facts: corpus-grounded prevalence — always printed, like role
     // twins/callers/callees below (a base rate of 1 is itself a fact) ──
     let fact_parts = fact_lines(&data.facts, data.family.as_ref());
-    println!("facts       {}", fact_parts.join(" \u{b7} "));
+    println!("facts       {}", fact_parts.join("; "));
 
     // ── clones: omitted entirely when the symbol has none ──
     let mut parts = Vec::new();
