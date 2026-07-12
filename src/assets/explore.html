@@ -889,7 +889,7 @@ function draw() {
         cap += ` · ${S[selected].calls_over} more callees not drawn`;
       }
     }
-    ctx.fillText(cap, PAD, H - 10);
+    drawCaption(cap, W, H);
   } else if (mode === "anchor") {
     const a = selected >= 0 ? S[selected].qname : "anchor";
     ctx.fillText(`x · structure sim → ${a} (A) · ${fmtVal(axisX, ext.x[0])} … ${fmtVal(axisX, ext.x[1])}`, PAD, H - 10);
@@ -901,6 +901,27 @@ function draw() {
     ctx.fillText(`x · ${axisLabel(axisX)} · ${fmtVal(axisX, ext.x[0])} … ${fmtVal(axisX, ext.x[1])}`, PAD, H - 10);
     ctx.fillText(`y · ${axisLabel(axisY)} · ${fmtVal(axisY, ext.y[0])} … ${fmtVal(axisY, ext.y[1])}`, PAD, 16);
   }
+}
+
+// The map caption, clip-proof (TKI-72): the honesty clauses ride at the
+// END of the line, so an overflow silently swallows exactly the text that
+// exists to keep the display honest (#28, #24). A caption wider than the
+// stage wraps once at a "·" boundary — two lines, same ink, clauses never
+// dropped, font never shrunk. A caption that fits renders exactly as the
+// single line always did.
+function drawCaption(cap, W, H) {
+  const max = W - 2 * PAD;
+  if (ctx.measureText(cap).width <= max) {
+    ctx.fillText(cap, PAD, H - 10);
+    return;
+  }
+  const parts = cap.split(" · ");
+  let first = parts.shift();
+  while (parts.length && ctx.measureText(`${first} · ${parts[0]}`).width <= max) {
+    first += ` · ${parts.shift()}`;
+  }
+  ctx.fillText(first, PAD, H - 22);
+  ctx.fillText(parts.join(" · "), PAD, H - 10);
 }
 
 // The selection's layout edges — the mutual-kNN springs that put it where
