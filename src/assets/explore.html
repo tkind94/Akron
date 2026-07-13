@@ -488,6 +488,11 @@ footer {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* one line of height is reserved even when empty: the hover readout
+     appearing must never resize the stage, or the dot slides out from
+     under the cursor and hover flaps (CEO-found oscillation, 2026-07-12).
+     border-box, so the line height rides on top of padding + border. */
+  min-height: calc(1lh + 7px);
 }
 </style>
 </head>
@@ -604,7 +609,7 @@ let lodWish = [];            // chip/card ids missing source, gathered per draw
 let lodTimer = 0;            // zoom-settle debounce before source fetches
 let lastView = {k: 0, tx: 0, ty: 0};
 const subCache = new Map();  // path -> /api/sublayout payload (deterministic)
-const LOD = {chipK: 2, chipCell: 60, cardK: 5, cardCell: 180, cardScale: 360,
+const LOD = {chipK: 2, chipCell: 60, cardK: 6, cardCell: 240, cardScale: 360,
              cardCap: 16, tol: 12, inK: 8, outK: 0.4, settle: 250};
 let mode = "map";           // map | anchor | time | axes
 let axisX = "map_x", axisY = "map_y";
@@ -1597,6 +1602,32 @@ function lineCount(text) {
 // end, then on to the next line boundary, until stable. Offsets are UTF-16
 // exactly like toks; cuts land right after a newline (or at end-of-text),
 // never inside a surrogate pair or a token span.
+// The hover peek shows the symbol's STUB — decorators plus the def/class
+// line(s) through the signature's close — not the body (CEO 2026-07-12:
+// whole functions in the hover window are too much; pinning still shows
+// the full text). Returns how many leading lines that stub spans, capped
+// by the caller; falls back to a short cut if no def/class line is found.
+function stubLines(text) {
+  const lines = text.split("\n");
+  let sawDef = false, depth = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (!sawDef) {
+      if (t.startsWith("def ") || t.startsWith("async def ") || t.startsWith("class ")) sawDef = true;
+      else if (t.startsWith("@") || t === "") continue;
+      else return 4; // unrecognized shape — short generic cut
+    }
+    if (sawDef) {
+      for (const ch of lines[i]) {
+        if (ch === "(") depth++;
+        else if (ch === ")") depth--;
+      }
+      if (depth <= 0 && /:\s*(#.*)?$/.test(t)) return i + 1;
+      if (depth <= 0 && t.includes("):")) return i + 1; // one-liner body
+    }
+  }
+  return lines.length;
+}
 function peekCut(src, maxLines) {
   const text = src.text;
   let cut = 0;
@@ -1652,7 +1683,7 @@ function fillPeek(id) {
     positionPeek();
     return;
   }
-  const cut = peekCut(src, PEEK_LINES);
+  const cut = peekCut(src, Math.min(PEEK_LINES, stubLines(src.text)));
   // drop a bare trailing newline, but never shave a span that owns it
   const end = cut > 0 && src.text[cut - 1] === "\n" &&
     !src.toks.some(t => t[0] <= cut - 1 && t[1] > cut - 1) ? cut - 1 : cut;
