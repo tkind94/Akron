@@ -257,7 +257,14 @@ main.hasSel { grid-template-columns: 1fr minmax(420px, 46%); }
 /* ── LOD cards (TKI-69): ambient world-scaled cards. Display only —
    pointer-events: none, so a click passes through to the dot beneath,
    which pins/selects exactly as before. Hover discloses, click commits. ── */
-.board.lod { z-index: 11; pointer-events: none; transform-origin: top left; opacity: 0.97; }
+.board.lod {
+  z-index: 11; pointer-events: none; transform-origin: top left; opacity: 0.97;
+  /* cards move on the compositor alone (TKI-83): position is fixed at the
+     stage origin and every frame writes only `transform`, so a pan never
+     forces style/layout across ten syntax-highlighted subtrees — the lag
+     the CEO hit was per-frame left/top writes reflowing all of them */
+  left: 0; top: 0; will-change: transform; contain: content;
+}
 .board.lod .bhead { cursor: default; }
 
 /* minimized boards dock as chips (soft cap: the oldest card yields) */
@@ -924,17 +931,20 @@ function draw() {
   connSegs = [];
   lodWish = [];
   if (spacing === null && px) computeSpacing();
-  const lodRects = drawLodCards(W, H);
+  const viewMoved = view.k !== lastView.k || view.tx !== lastView.tx || view.ty !== lastView.ty;
+  const lodRects = drawLodCards(W, H, viewMoved);
   if (lodRects.size) drawLodConnectors(lodRects, accent);
   drawChips(W, H, dimInk);
   if (boards.length) drawBoards(W, H, accent, dimInk);
   // source fetches for chips/cards fire only after the view settles —
   // zero fetches during the zoom/pan gesture itself (#39-adjacent; the
-  // same discipline as the peek dwell)
-  if (view.k !== lastView.k || view.tx !== lastView.tx || view.ty !== lastView.ty) {
+  // same discipline as the peek dwell). The settle timer runs even with
+  // nothing to fetch: drainLod's redraw is what unfreezes card membership
+  // after a gesture (TKI-83).
+  if (viewMoved) {
     lastView = {k: view.k, tx: view.tx, ty: view.ty};
     clearTimeout(lodTimer);
-    lodTimer = lodWish.length ? setTimeout(drainLod, LOD.settle) : 0;
+    lodTimer = setTimeout(drainLod, LOD.settle);
   } else if (lodWish.length && !lodTimer) {
     lodTimer = setTimeout(drainLod, LOD.settle);
   }
@@ -2254,9 +2264,28 @@ function fillLodCard(c, id) {
   c.el.dataset.filled = "1";
   c.h = 0; // remeasure below
 }
-function drawLodCards(W, H) {
+function drawLodCards(W, H, moving) {
   const shown = new Set();
   const rects = new Map();
+  // gesture in progress: the mounted cards ride their dots (one transform
+  // write each, compositor-only) and NOTHING mounts, unmounts, fills, or
+  // measures — that churn, per pan frame, is what buried the renderer
+  // (TKI-83). drainLod's settle redraw re-evaluates the full set.
+  if (moving) {
+    for (const [id, c] of lodPool) {
+      if (!c.el.isConnected) continue;
+      if (!visible(S[id]) || boardFor(id)) continue; // settle sweeps it
+      const cell = cellOf(id, W);
+      const sc = Math.min(1.25, cell / LOD.cardScale);
+      const [x, y] = screenXY(id);
+      const r = {x: x + 10, y: y + 10, w: 340 * sc, h: c.h * sc};
+      c.el.style.transform = `translate3d(${r.x}px, ${r.y}px, 0) scale(${sc})`;
+      shown.add(id);
+      rects.set(id, r);
+    }
+    lodShown = shown;
+    return rects;
+  }
   const cands = [];
   if (mode === "map" && view.k >= LOD.cardK && spacing) {
     const focus = focusDirs.size > 0;
@@ -2273,6 +2302,12 @@ function drawLodCards(W, H) {
   }
   for (const cd of cands) {
     if (shown.size >= LOD.cardCap) break;
+    // no source yet: wish for it and keep the chip — a card holding "…"
+    // is space without information (TKI-83); it appears when the code does
+    if (!srcCache.has(cd.i) || !srcCache.get(cd.i)) {
+      lodWish.push({id: cd.i, cell: cd.cell});
+      continue;
+    }
     const c = lodCard(cd.i);
     if (!c.el.isConnected) $("stage").appendChild(c.el); // c.h keys on content, not attachment
     fillLodCard(c, cd.i);
@@ -2291,10 +2326,9 @@ function drawLodCards(W, H) {
           r.y + LOD.tol < o.y + o.h && o.y + LOD.tol < r.y + r.h) { clash = true; break; }
     }
     if (clash) continue;
-    if (!srcCache.has(cd.i)) lodWish.push({id: cd.i, cell: cd.cell});
-    c.el.style.transform = `scale(${sc})`;
-    c.el.style.left = r.x + "px";
-    c.el.style.top = r.y + "px";
+    // compositor-only motion: translate+scale in one transform write —
+    // left/top stay 0 for the element's whole life (TKI-83)
+    c.el.style.transform = `translate3d(${r.x}px, ${r.y}px, 0) scale(${sc})`;
     shown.add(cd.i);
     rects.set(cd.i, r);
   }
@@ -2334,6 +2368,7 @@ function drainLod() {
   const batch = lodWish.sort((a, b) => b.cell - a.cell || a.id - b.id).slice(0, 32);
   for (const w of batch) ensureSource(w.id);
   lodWish = [];
+  scheduleDraw(); // the settle redraw: card membership unfreezes here (TKI-83)
 }
 
 // Unselect (TKI-80): the reverse of select() — an empty-canvas click,
